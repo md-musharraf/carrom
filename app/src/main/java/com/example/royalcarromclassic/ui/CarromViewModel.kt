@@ -4,6 +4,11 @@ import android.app.Application
 import androidx.compose.ui.graphics.Color
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.royalcarromclassic.core.audio.AudioEngine
+import com.example.royalcarromclassic.core.audio.SoundSynthesizer
+import com.example.royalcarromclassic.core.haptics.HapticController
+import com.example.royalcarromclassic.core.haptics.HapticEngine
+import com.example.royalcarromclassic.core.logging.AppLogger
 import com.example.royalcarromclassic.data.*
 import com.example.royalcarromclassic.engine.*
 import kotlinx.coroutines.*
@@ -15,12 +20,18 @@ import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.sin
 
-class CarromViewModel(application: Application) : AndroidViewModel(application) {
+/**
+ * Main ViewModel for Carrom game state, turn mechanics, physics loop, and rewards.
+ * Designed with SOLID principles, loose coupling, and memory efficiency.
+ */
+class CarromViewModel(
+    application: Application,
+    private val repository: GameRepository = PreferencesManager(application),
+    val sound: AudioEngine = SoundSynthesizer(application),
+    val haptic: HapticEngine = HapticController(application)
+) : AndroidViewModel(application) {
 
-    private val prefs = PreferencesManager(application)
-    val sound = SoundSynthesizer()
-    val haptic = HapticController(application)
-    val particles = ParticleSystem()
+    val particles = ParticleSystem(maxCapacity = 64)
 
     private val _gameState = MutableStateFlow(GameState())
     val gameState: StateFlow<GameState> = _gameState.asStateFlow()
@@ -34,23 +45,23 @@ class CarromViewModel(application: Application) : AndroidViewModel(application) 
     private val _physicsTick = MutableStateFlow(0L)
     val physicsTick: StateFlow<Long> = _physicsTick.asStateFlow()
 
-    private val _playerStats = MutableStateFlow(prefs.getPlayerStats())
+    private val _playerStats = MutableStateFlow(repository.getPlayerStats())
     val playerStats: StateFlow<PlayerStats> = _playerStats.asStateFlow()
 
     private val _strikers = MutableStateFlow(
-        ShopRepository.STRIKERS.map { it.copy(isUnlocked = prefs.isUnlocked(it.id, it.isUnlocked)) }
+        ShopRepository.STRIKERS.map { it.copy(isUnlocked = repository.isUnlocked(it.id, it.isUnlocked)) }
     )
     val strikers: StateFlow<List<StrikerConfig>> = _strikers.asStateFlow()
 
     private val _boards = MutableStateFlow(
-        ShopRepository.BOARDS.map { it.copy(isUnlocked = prefs.isUnlocked(it.id, it.isUnlocked)) }
+        ShopRepository.BOARDS.map { it.copy(isUnlocked = repository.isUnlocked(it.id, it.isUnlocked)) }
     )
     val boards: StateFlow<List<BoardTheme>> = _boards.asStateFlow()
 
     private val _trickShotLevels = MutableStateFlow(
         TrickShotsManager.LEVELS.map {
-            val stars = prefs.getTrickShotStars(it.id)
-            it.copy(stars = stars, isUnlocked = it.id == 1 || prefs.getTrickShotStars(it.id - 1) > 0)
+            val stars = repository.getTrickShotStars(it.id)
+            it.copy(stars = stars, isUnlocked = it.id == 1 || repository.getTrickShotStars(it.id - 1) > 0)
         }
     )
     val trickShotLevels: StateFlow<List<TrickShotLevel>> = _trickShotLevels.asStateFlow()
@@ -61,8 +72,8 @@ class CarromViewModel(application: Application) : AndroidViewModel(application) 
     private var currentTrickLevelId = 1
 
     init {
-        val savedStriker = prefs.getSelectedStriker()
-        val savedBoard = prefs.getSelectedBoard()
+        val savedStriker = repository.getSelectedStriker()
+        val savedBoard = repository.getSelectedBoard()
         _gameState.update {
             it.copy(
                 selectedStrikerId = savedStriker,
@@ -170,9 +181,10 @@ class CarromViewModel(application: Application) : AndroidViewModel(application) 
     private fun startPhysicsSimulation() {
         physicsJob?.cancel()
         physicsJob = viewModelScope.launch(Dispatchers.Default) {
-            val pocketedThisTurn = mutableListOf<Piece>()
+            val pocketedThisTurn = ArrayList<Piece>(4)
             var isMoving = true
             var lastTimeNanos = System.nanoTime()
+            var sparkFrameCounter = 0
 
             while (isMoving && isActive) {
                 val nowNanos = System.nanoTime()
@@ -182,33 +194,33 @@ class CarromViewModel(application: Application) : AndroidViewModel(application) 
                 val currentPieces = _pieces.value
                 val currentStriker = _striker.value
 
-                val (pocketedFrame, anyMoving) = CarromPhysicsEngine.updatePhysics(
+                val result = CarromPhysicsEngine.updatePhysics(
                     pieces = currentPieces,
                     striker = currentStriker,
                     dtSeconds = dtSeconds,
-                    onClack = { intensity ->
-                        sound.playClack(intensity)
-                    },
-                    onWall = { intensity ->
-                        sound.playWall(intensity)
-                    },
+                    onClack = { intensity -> sound.playClack(intensity) },
+                    onWall = { intensity -> sound.playWall(intensity) },
                     onPocket = {
                         sound.playPocket()
                         haptic.vibratePocket()
                     }
                 )
 
+                val pocketedFrame = result.pocketedPieces
                 if (pocketedFrame.isNotEmpty()) {
                     pocketedThisTurn.addAll(pocketedFrame)
-                    for (p in pocketedFrame) {
+                    val pCount = pocketedFrame.size
+                    for (i in 0 until pCount) {
+                        val p = pocketedFrame[i]
                         particles.spawnPocketVortex(p.x, p.y)
                     }
                 }
 
                 particles.update()
 
-                // Striker velocity smoke sparks
-                if (currentStriker != null && !currentStriker.isPocketed) {
+                // Striker velocity trail sparks (rate-limited to every 4th frame to reduce overhead)
+                sparkFrameCounter++
+                if (sparkFrameCounter % 4 == 0 && currentStriker != null && !currentStriker.isPocketed) {
                     val sSpeed = hypot(currentStriker.vx, currentStriker.vy)
                     if (sSpeed > 8f) {
                         particles.spawnImpactSparks(currentStriker.x, currentStriker.y, Color(0xFFFDE68A), count = 1)
@@ -216,10 +228,9 @@ class CarromViewModel(application: Application) : AndroidViewModel(application) 
                 }
 
                 _physicsTick.value++
+                isMoving = result.anyMoving
 
-                isMoving = anyMoving
-
-                delay(8) // Ultra-smooth 120 FPS high-refresh physics tick
+                delay(8) // Smooth physical clock tick
             }
 
             withContext(Dispatchers.Main) {
@@ -363,7 +374,7 @@ class CarromViewModel(application: Application) : AndroidViewModel(application) 
     private fun scheduleAIShot() {
         aiJob?.cancel()
         aiJob = viewModelScope.launch {
-            delay(500) // Bot thinking delay
+            delay(400) // Bot thinking delay
 
             val state = _gameState.value
             val shotPlan = CarromAIEngine.calculateBestShot(
@@ -374,17 +385,17 @@ class CarromViewModel(application: Application) : AndroidViewModel(application) 
                 difficulty = state.aiDifficulty
             )
 
-            // 1. Smooth baseline slider animation
+            // Smooth baseline slider animation
             val startFraction = state.strikerBaselineOffset
             val targetFraction = shotPlan.baselineFraction
-            val steps = 18
+            val steps = 14
             for (i in 1..steps) {
                 val frac = startFraction + (targetFraction - startFraction) * (i.toFloat() / steps)
                 setStrikerBaselineOffset(frac)
                 delay(16)
             }
 
-            // 2. Smooth aim rotation
+            // Smooth aim rotation
             val targetAngle = shotPlan.aimAngle
             val targetPower = shotPlan.power
             _gameState.update {
@@ -396,9 +407,9 @@ class CarromViewModel(application: Application) : AndroidViewModel(application) 
             }
             _physicsTick.value++
 
-            delay(350) // Aim freeze before strike
+            delay(300) // Aim freeze before strike
 
-            // 3. Execute Bot Strike
+            // Execute Bot Strike
             executeShot()
         }
     }
@@ -411,7 +422,7 @@ class CarromViewModel(application: Application) : AndroidViewModel(application) 
 
         if (isCleared) {
             val stars = if (trickShotCurrentShots <= currentLevel.maxShots) 3 else 2
-            prefs.setTrickShotStars(currentLevel.id, stars)
+            repository.setTrickShotStars(currentLevel.id, stars)
             _trickShotLevels.update { list ->
                 list.map {
                     if (it.id == currentLevel.id) it.copy(stars = stars)
@@ -512,7 +523,7 @@ class CarromViewModel(application: Application) : AndroidViewModel(application) 
                 it.copy(matchesPlayed = it.matchesPlayed + 1)
             }
         }
-        prefs.savePlayerStats(_playerStats.value)
+        repository.savePlayerStats(_playerStats.value)
     }
 
     fun awardRewards(coins: Int, xp: Int) {
@@ -536,7 +547,7 @@ class CarromViewModel(application: Application) : AndroidViewModel(application) 
             xpToNextLevel = nextLevelXp
         )
         _playerStats.value = updated
-        prefs.savePlayerStats(updated)
+        repository.savePlayerStats(updated)
     }
 
     fun buyStriker(striker: StrikerConfig) {
@@ -544,8 +555,8 @@ class CarromViewModel(application: Application) : AndroidViewModel(application) 
             sound.playCoin()
             val newStats = _playerStats.value.copy(coins = _playerStats.value.coins - striker.price)
             _playerStats.value = newStats
-            prefs.savePlayerStats(newStats)
-            prefs.setUnlocked(striker.id, true)
+            repository.savePlayerStats(newStats)
+            repository.setUnlocked(striker.id, true)
 
             _strikers.update { list ->
                 list.map { if (it.id == striker.id) it.copy(isUnlocked = true) else it }
@@ -560,8 +571,8 @@ class CarromViewModel(application: Application) : AndroidViewModel(application) 
             sound.playCoin()
             val newStats = _playerStats.value.copy(coins = _playerStats.value.coins - board.price)
             _playerStats.value = newStats
-            prefs.savePlayerStats(newStats)
-            prefs.setUnlocked(board.id, true)
+            repository.savePlayerStats(newStats)
+            repository.setUnlocked(board.id, true)
 
             _boards.update { list ->
                 list.map { if (it.id == board.id) it.copy(isUnlocked = true) else it }
@@ -572,13 +583,13 @@ class CarromViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun selectStriker(id: String) {
-        prefs.setSelectedStriker(id)
+        repository.setSelectedStriker(id)
         _gameState.update { it.copy(selectedStrikerId = id) }
         _physicsTick.value++
     }
 
     fun selectBoard(id: String) {
-        prefs.setSelectedBoard(id)
+        repository.setSelectedBoard(id)
         _gameState.update { it.copy(selectedBoardId = id) }
         _physicsTick.value++
     }
@@ -603,5 +614,12 @@ class CarromViewModel(application: Application) : AndroidViewModel(application) 
                 _gameState.update { it.copy(toastMessage = null) }
             }
         }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        physicsJob?.cancel()
+        aiJob?.cancel()
+        sound.release()
     }
 }

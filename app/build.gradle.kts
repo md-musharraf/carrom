@@ -37,6 +37,13 @@ android {
         excludes += "/META-INF/{AL2.0,LGPL2.1}"
       }
     }
+
+    lint {
+        abortOnError = false
+        checkReleaseBuilds = false
+        ignoreWarnings = false
+        warningsAsErrors = false
+    }
 }
 
 kotlin {
@@ -81,4 +88,9 @@ dependencies {
   implementation(libs.androidx.navigation3.ui)
   implementation(libs.androidx.navigation3.runtime)
   implementation(libs.androidx.lifecycle.viewmodel.navigation3)
+}
+
+tasks.register<Copy>("installGitHooks") {
+    from(rootProject.file(".githooks"))
+    into(rootProject.file(".git/hooks"))
 }

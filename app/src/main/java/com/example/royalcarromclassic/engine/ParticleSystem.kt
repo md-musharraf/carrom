@@ -3,82 +3,120 @@ package com.example.royalcarromclassic.engine
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
-import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.sin
 import kotlin.random.Random
 
-data class Particle(
-    var x: Float,
-    var y: Float,
-    var vx: Float,
-    var vy: Float,
-    val radius: Float,
-    val color: Color,
-    var alpha: Float = 1.0f,
-    var life: Int = 0,
-    val maxLife: Int = 20
-)
+/**
+ * Pre-allocated, zero-garbage particle entity.
+ */
+class Particle {
+    var x: Float = 0f
+    var y: Float = 0f
+    var vx: Float = 0f
+    var vy: Float = 0f
+    var radius: Float = 2f
+    var color: Color = Color(0xFFFBBF24)
+    var alpha: Float = 1.0f
+    var life: Int = 0
+    var maxLife: Int = 20
+    var isActive: Boolean = false
 
-class ParticleSystem {
-    private val particles = CopyOnWriteArrayList<Particle>()
+    fun reset(
+        newX: Float,
+        newY: Float,
+        newVx: Float,
+        newVy: Float,
+        newRadius: Float,
+        newColor: Color,
+        newMaxLife: Int
+    ) {
+        x = newX
+        y = newY
+        vx = newVx
+        vy = newVy
+        radius = newRadius
+        color = newColor
+        alpha = 1.0f
+        life = 0
+        maxLife = newMaxLife
+        isActive = true
+    }
+}
 
-    fun spawnImpactSparks(x: Float, y: Float, color: Color = Color(0xFFFBBF24), count: Int = 8) {
-        for (i in 0 until count) {
+/**
+ * High-performance, zero-allocation particle system.
+ * Uses a fixed circular ring pool of pre-allocated particles,
+ * completely eliminating GC pauses, array clones, and memory fragmentation.
+ */
+class ParticleSystem(private val maxCapacity: Int = 64) {
+    private val pool: Array<Particle> = Array(maxCapacity) { Particle() }
+    private var nextIndex: Int = 0
+
+    fun spawnImpactSparks(x: Float, y: Float, color: Color = Color(0xFFFBBF24), count: Int = 6) {
+        val clampedCount = count.coerceAtMost(maxCapacity)
+        for (i in 0 until clampedCount) {
             val angle = Random.nextFloat() * (2f * Math.PI.toFloat())
-            val speed = 1.5f + Random.nextFloat() * 4.5f
-            particles.add(
-                Particle(
-                    x = x,
-                    y = y,
-                    vx = cos(angle) * speed,
-                    vy = sin(angle) * speed,
-                    radius = 1.5f + Random.nextFloat() * 2.5f,
-                    color = color,
-                    maxLife = 15 + Random.nextInt(12)
-                )
+            val speed = 1.2f + Random.nextFloat() * 3.8f
+            val p = pool[nextIndex]
+            nextIndex = (nextIndex + 1) % maxCapacity
+
+            p.reset(
+                newX = x,
+                newY = y,
+                newVx = cos(angle) * speed,
+                newVy = sin(angle) * speed,
+                newRadius = 1.5f + Random.nextFloat() * 2.0f,
+                newColor = color,
+                newMaxLife = 12 + Random.nextInt(10)
             )
         }
     }
 
     fun spawnPocketVortex(x: Float, y: Float, color: Color = Color(0xFFF59E0B)) {
-        for (i in 0 until 12) {
-            val angle = (i.toFloat() / 12f) * (2f * Math.PI.toFloat())
-            val dist = 30f + Random.nextFloat() * 10f
-            particles.add(
-                Particle(
-                    x = x + cos(angle) * dist,
-                    y = y + sin(angle) * dist,
-                    vx = -cos(angle) * 1.5f + sin(angle) * 1.0f,
-                    vy = -sin(angle) * 1.5f - cos(angle) * 1.0f,
-                    radius = 2.0f + Random.nextFloat() * 2f,
-                    color = color,
-                    maxLife = 22
-                )
+        val vortexCount = 10
+        for (i in 0 until vortexCount) {
+            val angle = (i.toFloat() / vortexCount.toFloat()) * (2f * Math.PI.toFloat())
+            val dist = 26f + Random.nextFloat() * 8f
+            val p = pool[nextIndex]
+            nextIndex = (nextIndex + 1) % maxCapacity
+
+            p.reset(
+                newX = x + cos(angle) * dist,
+                newY = y + sin(angle) * dist,
+                newVx = -cos(angle) * 1.4f + sin(angle) * 0.9f,
+                newVy = -sin(angle) * 1.4f - cos(angle) * 0.9f,
+                newRadius = 2.0f + Random.nextFloat() * 1.8f,
+                newColor = color,
+                newMaxLife = 18
             )
         }
     }
 
     fun update() {
-        val iterator = particles.iterator()
-        while (iterator.hasNext()) {
-            val p = iterator.next()
+        for (i in 0 until maxCapacity) {
+            val p = pool[i]
+            if (!p.isActive) continue
+
             p.life++
             p.x += p.vx
             p.y += p.vy
-            p.vx *= 0.94f
-            p.vy *= 0.94f
+            p.vx *= 0.93f
+            p.vy *= 0.93f
             p.alpha = max(0f, 1f - (p.life.toFloat() / p.maxLife.toFloat()))
 
             if (p.life >= p.maxLife) {
-                particles.remove(p)
+                p.isActive = false
             }
         }
     }
 
     fun draw(drawScope: DrawScope) {
-        for (p in particles) {
+        for (i in 0 until maxCapacity) {
+            val p = pool[i]
+            if (!p.isActive || p.alpha <= 0.01f) continue
+
             drawScope.drawCircle(
                 color = p.color.copy(alpha = p.alpha),
                 radius = p.radius,
@@ -88,6 +126,8 @@ class ParticleSystem {
     }
 
     fun clear() {
-        particles.clear()
+        for (i in 0 until maxCapacity) {
+            pool[i].isActive = false
+        }
     }
 }

@@ -1,6 +1,7 @@
 package com.example.royalcarromclassic.engine
 
 import androidx.compose.ui.graphics.Color
+import com.example.royalcarromclassic.core.logging.PerformanceTracker
 import com.example.royalcarromclassic.data.Piece
 import com.example.royalcarromclassic.data.PieceType
 import com.example.royalcarromclassic.data.Vector2D
@@ -16,8 +17,13 @@ object CarromPhysicsEngine {
         val strikerDeflectPath: List<Vector2D>
     )
 
+    data class PhysicsStepResult(
+        val pocketedPieces: List<Piece>,
+        val anyMoving: Boolean
+    )
+
     // Ultra-smooth physical parameters
-    const val SUB_STEPS = 12
+    const val SUB_STEPS = 10
     const val RESTITUTION_PUCK_PUCK = 0.94f
     const val RESTITUTION_STRIKER_PUCK = 0.92f
     const val RESTITUTION_WALL = 0.88f
@@ -136,8 +142,8 @@ object CarromPhysicsEngine {
     }
 
     /**
-     * Executes physics simulation with variable delta-time support
-     * Perfectly tuned for 60Hz - 120Hz display refresh rates
+     * Executes physics simulation with variable delta-time support.
+     * Pre-computes exponential math per frame to ensure zero CPU stalls.
      */
     fun updatePhysics(
         pieces: List<Piece>,
@@ -146,42 +152,48 @@ object CarromPhysicsEngine {
         onClack: (intensity: Float) -> Unit = {},
         onWall: (intensity: Float) -> Unit = {},
         onPocket: () -> Unit = {}
-    ): Pair<List<Piece>, Boolean> {
-        val subStepCount = SUB_STEPS
-        // Sub-step delta time (normalized to reference 60fps unit of 1.0)
-        val subDt = (dtSeconds * 60f) / subStepCount.toFloat()
+    ): PhysicsStepResult {
+        val startNanos = PerformanceTracker.recordPhysicsTickStart()
 
-        val activePieces = mutableListOf<Piece>()
+        val subStepCount = SUB_STEPS
+        val subDt = (dtSeconds * 60f) / subStepCount.toFloat()
+        // Precompute friction factor once per frame instead of inside inner loops
+        val frictionMult = FRICTION_BASE.pow(subDt)
+        val linearDecel = LINEAR_DRAG * subDt
+
+        val activePieces = ArrayList<Piece>(pieces.size + 1)
         if (striker != null && !striker.isPocketed) {
             activePieces.add(striker)
         }
-        for (p in pieces) {
+        val pieceCount = pieces.size
+        for (i in 0 until pieceCount) {
+            val p = pieces[i]
             if (!p.isPocketed) {
                 activePieces.add(p)
             } else if (p.pocketProgress > 0f) {
-                // Update dropping animation in pocket
                 p.pocketProgress = max(0f, p.pocketProgress - (0.06f * subDt * subStepCount))
             }
         }
 
-        val pocketedThisFrame = mutableListOf<Piece>()
+        val pocketedThisFrame = ArrayList<Piece>(4)
         var anyMoving = false
+        val activeCount = activePieces.size
 
         for (step in 0 until subStepCount) {
-            // 1. Position update, smooth friction deceleration & pocket attraction
-            for (p in activePieces) {
+            // 1. Position update, friction deceleration & pocket suction
+            for (i in 0 until activeCount) {
+                val p = activePieces[i]
                 if (p.isPocketed) continue
 
                 p.x += p.vx * subDt
                 p.y += p.vy * subDt
 
-                // Silky powder friction model
                 val speed = hypot(p.vx, p.vy)
                 if (speed > VELOCITY_EPSILON) {
-                    val frictionMult = FRICTION_BASE.pow(subDt)
-                    val decel = min(speed, LINEAR_DRAG * subDt)
-                    val normVx = p.vx / speed
-                    val normVy = p.vy / speed
+                    val decel = min(speed, linearDecel)
+                    val invSpeed = 1f / speed
+                    val normVx = p.vx * invSpeed
+                    val normVy = p.vy * invSpeed
 
                     p.vx = (p.vx * frictionMult) - (normVx * decel)
                     p.vy = (p.vy * frictionMult) - (normVy * decel)
@@ -218,7 +230,8 @@ object CarromPhysicsEngine {
             }
 
             // 2. Wall / Cushion Collisions
-            for (p in activePieces) {
+            for (i in 0 until activeCount) {
+                val p = activePieces[i]
                 if (p.isPocketed) continue
 
                 val minBound = BoardGeometry.PLAYABLE_MIN + p.radius
@@ -251,17 +264,17 @@ object CarromPhysicsEngine {
                 }
 
                 if (hitWall && impactSpeed > 0.6f) {
+                    PerformanceTracker.recordCollision()
                     onWall((impactSpeed / 14f).coerceIn(0f, 1f))
                 }
             }
 
-            // 3. Circle-Circle Rigid Body Collisions with Smooth Positional Separation
-            val count = activePieces.size
-            for (i in 0 until count) {
+            // 3. Circle-Circle Collisions & Positional Separation
+            for (i in 0 until activeCount) {
                 val p1 = activePieces[i]
                 if (p1.isPocketed) continue
 
-                for (j in i + 1 until count) {
+                for (j in i + 1 until activeCount) {
                     val p2 = activePieces[j]
                     if (p2.isPocketed) continue
 
@@ -271,14 +284,16 @@ object CarromPhysicsEngine {
                     val minDist = p1.radius + p2.radius
 
                     if (dist < minDist && dist > 0.0001f) {
-                        val nx = dx / dist
-                        val ny = dy / dist
+                        val invDist = 1f / dist
+                        val nx = dx * invDist
+                        val ny = dy * invDist
 
-                        // Positional correction
-                        val overlap = (minDist - dist)
+                        // Positional correction to prevent disc overlap
+                        val overlap = minDist - dist
                         val totalMass = p1.mass + p2.mass
-                        val m1Ratio = p2.mass / totalMass
-                        val m2Ratio = p1.mass / totalMass
+                        val invTotalMass = 1f / totalMass
+                        val m1Ratio = p2.mass * invTotalMass
+                        val m2Ratio = p1.mass * invTotalMass
 
                         p1.x -= nx * overlap * m1Ratio
                         p1.y -= ny * overlap * m1Ratio
@@ -297,13 +312,17 @@ object CarromPhysicsEngine {
                             }
 
                             val impulse = -(1f + restitution) * velAlongNormal / ((1f / p1.mass) + (1f / p2.mass))
-                            p1.vx -= (impulse / p1.mass) * nx
-                            p1.vy -= (impulse / p1.mass) * ny
-                            p2.vx += (impulse / p2.mass) * nx
-                            p2.vy += (impulse / p2.mass) * ny
+                            val invM1 = 1f / p1.mass
+                            val invM2 = 1f / p2.mass
+
+                            p1.vx -= (impulse * invM1) * nx
+                            p1.vy -= (impulse * invM1) * ny
+                            p2.vx += (impulse * invM2) * nx
+                            p2.vy += (impulse * invM2) * ny
 
                             val impulseMag = abs(impulse)
                             if (impulseMag > 0.35f) {
+                                PerformanceTracker.recordCollision()
                                 onClack((impulseMag / 10f).coerceIn(0f, 1f))
                             }
                         }
@@ -312,7 +331,8 @@ object CarromPhysicsEngine {
             }
         }
 
-        return Pair(pocketedThisFrame, anyMoving)
+        PerformanceTracker.recordPhysicsTickEnd(startNanos)
+        return PhysicsStepResult(pocketedThisFrame, anyMoving)
     }
 
     fun calculateTrajectory(
@@ -328,22 +348,25 @@ object CarromPhysicsEngine {
         var simVx = cos(aimAngle) * speed
         var simVy = sin(aimAngle) * speed
 
-        val strikerPath = mutableListOf(Vector2D(simX, simY))
+        val strikerPath = ArrayList<Vector2D>(40)
+        strikerPath.add(Vector2D(simX, simY))
         var targetHitPiece: Piece? = null
         var targetHitGhostPos: Vector2D? = null
-        val targetPath = mutableListOf<Vector2D>()
-        val strikerDeflectPath = mutableListOf<Vector2D>()
+        val targetPath = ArrayList<Vector2D>(2)
+        val strikerDeflectPath = ArrayList<Vector2D>(2)
 
         val maxSteps = 160
         val dt = 0.5f
         var bounces = 0
+        val pieceCount = pieces.size
 
         for (s in 0 until maxSteps) {
             simX += simVx * dt
             simY += simVy * dt
 
             // Piece collision check
-            for (p in pieces) {
+            for (i in 0 until pieceCount) {
+                val p = pieces[i]
                 if (p.isPocketed) continue
                 val dx = p.x - simX
                 val dy = p.y - simY

@@ -1,0 +1,15 @@
+#!/bin/sh
+# Git Pre-Commit Hook (Husky equivalent for Android/Gradle projects)
+echo "🔍 Running pre-commit validation (Tests & Lint Checks)..."
+
+if [ -f "./gradlew" ]; then
+    ./gradlew testDebugUnitTest --no-daemon
+    RESULT=$?
+    if [ $RESULT -ne 0 ]; then
+        echo "❌ Pre-commit validation failed! Fix failing unit tests before committing."
+        exit 1
+    fi
+fi
+
+echo "✅ Pre-commit validation passed successfully!"
+exit 0

@@ -17,6 +17,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.royalcarromclassic.data.*
 
+/**
+ * Main game screen composable.
+ * Optimized to prevent top-level recompositions during physical piece motion.
+ */
 @Composable
 fun MainGameScreen(
     viewModel: CarromViewModel = viewModel()
@@ -27,7 +31,6 @@ fun MainGameScreen(
     val playerStats by viewModel.playerStats.collectAsStateWithLifecycle()
     val strikers by viewModel.strikers.collectAsStateWithLifecycle()
     val boards by viewModel.boards.collectAsStateWithLifecycle()
-    val physicsTick by viewModel.physicsTick.collectAsStateWithLifecycle()
     val trickShotLevels by viewModel.trickShotLevels.collectAsStateWithLifecycle()
 
     var showModesSheet by remember { mutableStateOf(false) }
@@ -37,12 +40,16 @@ fun MainGameScreen(
     var showRulesSheet by remember { mutableStateOf(false) }
     var showSettingsSheet by remember { mutableStateOf(false) }
 
-    val activeBoardTheme = boards.find { it.id == gameState.selectedBoardId } ?: boards.first()
-    val activeStrikerConfig = strikers.find { it.id == gameState.selectedStrikerId } ?: strikers.first()
+    val activeBoardTheme = remember(boards, gameState.selectedBoardId) {
+        boards.find { it.id == gameState.selectedBoardId } ?: boards.first()
+    }
+    val activeStrikerConfig = remember(strikers, gameState.selectedStrikerId) {
+        strikers.find { it.id == gameState.selectedStrikerId } ?: strikers.first()
+    }
 
-    val remainingWhites = pieces.count { it.type == PieceType.WHITE && !it.isPocketed }
-    val remainingBlacks = pieces.count { it.type == PieceType.BLACK && !it.isPocketed }
-    val isQueenOnBoard = pieces.any { it.type == PieceType.QUEEN && !it.isPocketed }
+    val remainingWhites = remember(pieces) { pieces.count { it.type == PieceType.WHITE && !it.isPocketed } }
+    val remainingBlacks = remember(pieces) { pieces.count { it.type == PieceType.BLACK && !it.isPocketed } }
+    val isQueenOnBoard = remember(pieces) { pieces.any { it.type == PieceType.QUEEN && !it.isPocketed } }
 
     Scaffold(
         containerColor = Color(0xFF090D16)
@@ -79,7 +86,7 @@ fun MainGameScreen(
                     isQueenOnBoard = isQueenOnBoard
                 )
 
-                // 3. Central Carrom Board Canvas
+                // 3. Central Carrom Board Canvas (Isolated high-frequency render scope)
                 CarromBoardCanvas(
                     pieces = pieces,
                     striker = striker,
@@ -87,7 +94,7 @@ fun MainGameScreen(
                     strikerConfig = activeStrikerConfig,
                     gameState = gameState,
                     particles = viewModel.particles,
-                    physicsTick = physicsTick,
+                    physicsTickFlow = viewModel.physicsTick,
                     onPositionChanged = { viewModel.setStrikerBaselineOffset(it) },
                     onAimChanged = { angle, power -> viewModel.setStrikerAim(angle, power) },
                     onShoot = { viewModel.executeShot() },

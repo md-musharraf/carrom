@@ -3,10 +3,13 @@ package com.example.royalcarromclassic.data
 import android.content.Context
 import android.content.SharedPreferences
 
-class PreferencesManager(context: Context) {
+/**
+ * Implementation of GameRepository backed by Android SharedPreferences.
+ */
+class PreferencesManager(context: Context) : GameRepository {
     private val prefs: SharedPreferences = context.getSharedPreferences("royal_carrom_prefs", Context.MODE_PRIVATE)
 
-    fun getPlayerStats(): PlayerStats {
+    override fun getPlayerStats(): PlayerStats {
         return PlayerStats(
             coins = prefs.getInt("coins", 1200),
             gems = prefs.getInt("gems", 25),
@@ -21,7 +24,7 @@ class PreferencesManager(context: Context) {
         )
     }
 
-    fun savePlayerStats(stats: PlayerStats) {
+    override fun savePlayerStats(stats: PlayerStats) {
         prefs.edit()
             .putInt("coins", stats.coins)
             .putInt("gems", stats.gems)
@@ -36,35 +39,35 @@ class PreferencesManager(context: Context) {
             .apply()
     }
 
-    fun isUnlocked(itemId: String, defaultUnlocked: Boolean): Boolean {
+    override fun isUnlocked(itemId: String, defaultUnlocked: Boolean): Boolean {
         return prefs.getBoolean("unlocked_$itemId", defaultUnlocked)
     }
 
-    fun setUnlocked(itemId: String, unlocked: Boolean) {
+    override fun setUnlocked(itemId: String, unlocked: Boolean) {
         prefs.edit().putBoolean("unlocked_$itemId", unlocked).apply()
     }
 
-    fun getSelectedStriker(): String {
+    override fun getSelectedStriker(): String {
         return prefs.getString("selected_striker", "classic_ivory") ?: "classic_ivory"
     }
 
-    fun setSelectedStriker(id: String) {
+    override fun setSelectedStriker(id: String) {
         prefs.edit().putString("selected_striker", id).apply()
     }
 
-    fun getSelectedBoard(): String {
+    override fun getSelectedBoard(): String {
         return prefs.getString("selected_board", "classic_teak") ?: "classic_teak"
     }
 
-    fun setSelectedBoard(id: String) {
+    override fun setSelectedBoard(id: String) {
         prefs.edit().putString("selected_board", id).apply()
     }
 
-    fun getTrickShotStars(levelId: Int): Int {
+    override fun getTrickShotStars(levelId: Int): Int {
         return prefs.getInt("trick_stars_$levelId", 0)
     }
 
-    fun setTrickShotStars(levelId: Int, stars: Int) {
+    override fun setTrickShotStars(levelId: Int, stars: Int) {
         val current = getTrickShotStars(levelId)
         if (stars > current) {
             prefs.edit().putInt("trick_stars_$levelId", stars).apply()

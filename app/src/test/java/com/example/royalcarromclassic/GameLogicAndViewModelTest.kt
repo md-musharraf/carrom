@@ -51,6 +51,8 @@ class MockAudioEngine : AudioEngine {
 class MockHapticEngine : HapticEngine {
     override var isHapticEnabled: Boolean = true
     override fun vibrateShort(durationMs: Long) {}
+    override fun vibrateTick() {}
+    override fun vibrateCollision(intensity: Float) {}
     override fun vibrateStrike() {}
     override fun vibratePocket() {}
 }

@@ -48,9 +48,9 @@ class Particle {
 /**
  * High-performance, zero-allocation particle system.
  * Uses a fixed circular ring pool of pre-allocated particles,
- * completely eliminating GC pauses, array clones, and memory fragmentation.
+ * completely eliminating GC pauses and memory allocations during gameplay.
  */
-class ParticleSystem(private val maxCapacity: Int = 64) {
+class ParticleSystem(private val maxCapacity: Int = 96) {
     private val pool: Array<Particle> = Array(maxCapacity) { Particle() }
     private var nextIndex: Int = 0
 
@@ -58,7 +58,7 @@ class ParticleSystem(private val maxCapacity: Int = 64) {
         val clampedCount = count.coerceAtMost(maxCapacity)
         for (i in 0 until clampedCount) {
             val angle = Random.nextFloat() * (2f * Math.PI.toFloat())
-            val speed = 1.2f + Random.nextFloat() * 3.8f
+            val speed = 1.2f + Random.nextFloat() * 3.6f
             val p = pool[nextIndex]
             nextIndex = (nextIndex + 1) % maxCapacity
 
@@ -67,29 +67,49 @@ class ParticleSystem(private val maxCapacity: Int = 64) {
                 newY = y,
                 newVx = cos(angle) * speed,
                 newVy = sin(angle) * speed,
-                newRadius = 1.5f + Random.nextFloat() * 2.0f,
+                newRadius = 1.5f + Random.nextFloat() * 2.2f,
                 newColor = color,
                 newMaxLife = 12 + Random.nextInt(10)
             )
         }
     }
 
+    fun spawnCollisionDust(x: Float, y: Float, count: Int = 5) {
+        val clampedCount = count.coerceAtMost(maxCapacity)
+        for (i in 0 until clampedCount) {
+            val angle = Random.nextFloat() * (2f * Math.PI.toFloat())
+            val speed = 0.6f + Random.nextFloat() * 1.8f
+            val p = pool[nextIndex]
+            nextIndex = (nextIndex + 1) % maxCapacity
+
+            p.reset(
+                newX = x,
+                newY = y,
+                newVx = cos(angle) * speed,
+                newVy = sin(angle) * speed,
+                newRadius = 2.2f + Random.nextFloat() * 2.5f,
+                newColor = Color.White.copy(alpha = 0.6f),
+                newMaxLife = 14 + Random.nextInt(8)
+            )
+        }
+    }
+
     fun spawnPocketVortex(x: Float, y: Float, color: Color = Color(0xFFF59E0B)) {
-        val vortexCount = 10
+        val vortexCount = 12
         for (i in 0 until vortexCount) {
             val angle = (i.toFloat() / vortexCount.toFloat()) * (2f * Math.PI.toFloat())
-            val dist = 26f + Random.nextFloat() * 8f
+            val dist = 28f + Random.nextFloat() * 8f
             val p = pool[nextIndex]
             nextIndex = (nextIndex + 1) % maxCapacity
 
             p.reset(
                 newX = x + cos(angle) * dist,
                 newY = y + sin(angle) * dist,
-                newVx = -cos(angle) * 1.4f + sin(angle) * 0.9f,
-                newVy = -sin(angle) * 1.4f - cos(angle) * 0.9f,
-                newRadius = 2.0f + Random.nextFloat() * 1.8f,
+                newVx = -cos(angle) * 1.5f + sin(angle) * 1.0f,
+                newVy = -sin(angle) * 1.5f - cos(angle) * 1.0f,
+                newRadius = 2.2f + Random.nextFloat() * 2.0f,
                 newColor = color,
-                newMaxLife = 18
+                newMaxLife = 20
             )
         }
     }
@@ -102,9 +122,10 @@ class ParticleSystem(private val maxCapacity: Int = 64) {
             p.life++
             p.x += p.vx
             p.y += p.vy
-            p.vx *= 0.93f
-            p.vy *= 0.93f
-            p.alpha = max(0f, 1f - (p.life.toFloat() / p.maxLife.toFloat()))
+            p.vx *= 0.94f
+            p.vy *= 0.94f
+            val progress = p.life.toFloat() / p.maxLife.toFloat()
+            p.alpha = max(0f, (1f - progress) * (1f - progress))
 
             if (p.life >= p.maxLife) {
                 p.isActive = false
@@ -117,6 +138,13 @@ class ParticleSystem(private val maxCapacity: Int = 64) {
             val p = pool[i]
             if (!p.isActive || p.alpha <= 0.01f) continue
 
+            // Soft glow
+            drawScope.drawCircle(
+                color = p.color.copy(alpha = p.alpha * 0.35f),
+                radius = p.radius * 1.8f,
+                center = Offset(p.x, p.y)
+            )
+            // Core
             drawScope.drawCircle(
                 color = p.color.copy(alpha = p.alpha),
                 radius = p.radius,

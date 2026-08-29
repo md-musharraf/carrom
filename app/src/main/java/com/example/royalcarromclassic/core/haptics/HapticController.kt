@@ -28,6 +28,9 @@ class HapticController(context: Context) : HapticEngine {
 
     override var isHapticEnabled: Boolean = true
 
+    private var lastTickTimeNanos = 0L
+    private var lastCollisionHapticNanos = 0L
+
     override fun vibrateShort(durationMs: Long) {
         if (!isHapticEnabled || vibrator == null || !vibrator.hasVibrator()) return
         try {
@@ -39,6 +42,45 @@ class HapticController(context: Context) : HapticEngine {
             }
         } catch (_: Exception) {
             // Guard against device-specific vibration exceptions
+        }
+    }
+
+    override fun vibrateTick() {
+        if (!isHapticEnabled || vibrator == null || !vibrator.hasVibrator()) return
+        val now = System.nanoTime()
+        if (now - lastTickTimeNanos < 40_000_000L) return // 40ms debounce
+        lastTickTimeNanos = now
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                vibrator.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK))
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator.vibrate(VibrationEffect.createOneShot(6, 60))
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator.vibrate(8)
+            }
+        } catch (_: Exception) {
+            // Safe fallback
+        }
+    }
+
+    override fun vibrateCollision(intensity: Float) {
+        if (!isHapticEnabled || vibrator == null || !vibrator.hasVibrator()) return
+        val now = System.nanoTime()
+        if (now - lastCollisionHapticNanos < 50_000_000L) return // 50ms debounce
+        lastCollisionHapticNanos = now
+
+        try {
+            val amp = (intensity * 180f).toInt().coerceIn(30, 220)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator.vibrate(VibrationEffect.createOneShot(14, amp))
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator.vibrate(12)
+            }
+        } catch (_: Exception) {
+            // Safe fallback
         }
     }
 

@@ -8,6 +8,8 @@ interface HapticEngine {
     var isHapticEnabled: Boolean
 
     fun vibrateShort(durationMs: Long = 15)
+    fun vibrateTick()
+    fun vibrateCollision(intensity: Float = 0.5f)
     fun vibrateStrike()
     fun vibratePocket()
 }

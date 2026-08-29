@@ -105,9 +105,12 @@ fun MainGameScreen(
                 StrikerControlsView(
                     gameState = gameState,
                     strikerConfig = activeStrikerConfig,
-                    onPositionChanged = { viewModel.setStrikerBaselineOffset(it) },
+                    onPositionChanged = { viewModel.setStrikerBaselineOffset(it, isManualTouch = true) },
                     onAimAngleChanged = { viewModel.setStrikerAim(it, gameState.strikerPower) },
-                    onPowerChanged = { viewModel.setStrikerAim(gameState.strikerAimAngle, it) }
+                    onPowerChanged = { viewModel.setStrikerAim(gameState.strikerAimAngle, it) },
+                    onNudgeAngle = { viewModel.nudgeAimAngle(it) },
+                    onNudgePower = { viewModel.nudgePower(it) },
+                    onShoot = { viewModel.executeShot() }
                 )
             }
 

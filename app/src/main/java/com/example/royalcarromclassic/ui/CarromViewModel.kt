@@ -120,13 +120,16 @@ class CarromViewModel(
         _physicsTick.value++
     }
 
-    fun setStrikerBaselineOffset(fraction: Float) {
+    fun setStrikerBaselineOffset(fraction: Float, isManualTouch: Boolean = false) {
         val clamped = fraction.coerceIn(0.06f, 0.94f)
         val isBottom = _gameState.value.currentTurn == "player1" || _gameState.value.mode == GameMode.TRICK_SHOTS
         val pos = BoardGeometry.getBaselineStrikerPos(clamped, isBottom)
         _striker.value?.let {
             it.x = pos.x
             it.y = pos.y
+        }
+        if (isManualTouch) {
+            haptic.vibrateTick()
         }
         _gameState.update { it.copy(strikerBaselineOffset = clamped) }
         _physicsTick.value++
@@ -141,6 +144,19 @@ class CarromViewModel(
             )
         }
         _physicsTick.value++
+    }
+
+    fun nudgeAimAngle(deltaDegrees: Float) {
+        val rad = (deltaDegrees * Math.PI.toFloat()) / 180f
+        val newAngle = _gameState.value.strikerAimAngle + rad
+        setStrikerAim(newAngle, _gameState.value.strikerPower)
+        haptic.vibrateTick()
+    }
+
+    fun nudgePower(delta: Float) {
+        val newPower = (_gameState.value.strikerPower + delta).coerceIn(20f, 100f)
+        setStrikerAim(_gameState.value.strikerAimAngle, newPower)
+        haptic.vibrateTick()
     }
 
     fun executeShot() {
@@ -188,7 +204,7 @@ class CarromViewModel(
 
             while (isMoving && isActive) {
                 val nowNanos = System.nanoTime()
-                val dtSeconds = ((nowNanos - lastTimeNanos) / 1_000_000_000f).coerceIn(0.001f, 0.025f)
+                val dtSeconds = ((nowNanos - lastTimeNanos) / 1_000_000_000f).coerceIn(0.004f, 0.022f)
                 lastTimeNanos = nowNanos
 
                 val currentPieces = _pieces.value
@@ -198,8 +214,21 @@ class CarromViewModel(
                     pieces = currentPieces,
                     striker = currentStriker,
                     dtSeconds = dtSeconds,
-                    onClack = { intensity -> sound.playClack(intensity) },
-                    onWall = { intensity -> sound.playWall(intensity) },
+                    onClack = { intensity ->
+                        sound.playClack(intensity)
+                        if (intensity > 0.4f) {
+                            haptic.vibrateCollision(intensity)
+                        }
+                        if (intensity > 0.65f && currentStriker != null && !currentStriker.isPocketed) {
+                            particles.spawnImpactSparks(currentStriker.x, currentStriker.y, Color(0xFFFDE68A), count = 3)
+                        }
+                    },
+                    onWall = { intensity ->
+                        sound.playWall(intensity)
+                        if (intensity > 0.5f) {
+                            haptic.vibrateTick()
+                        }
+                    },
                     onPocket = {
                         sound.playPocket()
                         haptic.vibratePocket()
@@ -218,11 +247,11 @@ class CarromViewModel(
 
                 particles.update()
 
-                // Striker velocity trail sparks (rate-limited to every 4th frame to reduce overhead)
+                // Striker velocity trail sparks (rate-limited for performance)
                 sparkFrameCounter++
-                if (sparkFrameCounter % 4 == 0 && currentStriker != null && !currentStriker.isPocketed) {
+                if (sparkFrameCounter % 3 == 0 && currentStriker != null && !currentStriker.isPocketed) {
                     val sSpeed = hypot(currentStriker.vx, currentStriker.vy)
-                    if (sSpeed > 8f) {
+                    if (sSpeed > 7f) {
                         particles.spawnImpactSparks(currentStriker.x, currentStriker.y, Color(0xFFFDE68A), count = 1)
                     }
                 }
@@ -230,7 +259,7 @@ class CarromViewModel(
                 _physicsTick.value++
                 isMoving = result.anyMoving
 
-                delay(8) // Smooth physical clock tick
+                delay(6) // Smooth 120Hz-ready physical clock tick
             }
 
             withContext(Dispatchers.Main) {
@@ -374,7 +403,7 @@ class CarromViewModel(
     private fun scheduleAIShot() {
         aiJob?.cancel()
         aiJob = viewModelScope.launch {
-            delay(400) // Bot thinking delay
+            delay(350) // Bot initial decision time
 
             val state = _gameState.value
             val shotPlan = CarromAIEngine.calculateBestShot(
@@ -385,31 +414,54 @@ class CarromViewModel(
                 difficulty = state.aiDifficulty
             )
 
-            // Smooth baseline slider animation
+            // Stage 1: Smooth baseline slider movement with cosine ease
             val startFraction = state.strikerBaselineOffset
             val targetFraction = shotPlan.baselineFraction
-            val steps = 14
-            for (i in 1..steps) {
-                val frac = startFraction + (targetFraction - startFraction) * (i.toFloat() / steps)
-                setStrikerBaselineOffset(frac)
-                delay(16)
+            val sliderSteps = 16
+            for (i in 1..sliderSteps) {
+                val t = i.toFloat() / sliderSteps.toFloat()
+                val easeT = (1f - cos(t * Math.PI.toFloat())) / 2f
+                val frac = startFraction + (targetFraction - startFraction) * easeT
+                setStrikerBaselineOffset(frac, isManualTouch = false)
+                delay(14)
             }
 
-            // Smooth aim rotation
+            delay(120)
+
+            // Stage 2: Smooth aim rotation with cubic ease
+            val startAngle = _gameState.value.strikerAimAngle
             val targetAngle = shotPlan.aimAngle
-            val targetPower = shotPlan.power
-            _gameState.update {
-                it.copy(
-                    strikerAimAngle = targetAngle,
-                    strikerPower = targetPower,
-                    turnState = TurnState.AIMING
-                )
+            val aimSteps = 16
+            for (i in 1..aimSteps) {
+                val t = i.toFloat() / aimSteps.toFloat()
+                val easeT = t * t * (3f - 2f * t)
+                val curAngle = startAngle + (targetAngle - startAngle) * easeT
+                _gameState.update {
+                    it.copy(
+                        strikerAimAngle = curAngle,
+                        turnState = TurnState.AIMING
+                    )
+                }
+                _physicsTick.value++
+                delay(12)
             }
-            _physicsTick.value++
 
-            delay(300) // Aim freeze before strike
+            // Stage 3: Smooth power pull-back windup
+            val targetPower = shotPlan.power
+            val powerSteps = 10
+            for (i in 1..powerSteps) {
+                val t = i.toFloat() / powerSteps.toFloat()
+                val curPower = 20f + (targetPower - 20f) * t
+                _gameState.update {
+                    it.copy(strikerPower = curPower)
+                }
+                _physicsTick.value++
+                delay(12)
+            }
 
-            // Execute Bot Strike
+            delay(200) // Brief lock-on freeze before striking
+
+            // Stage 4: Execute Bot Strike
             executeShot()
         }
     }

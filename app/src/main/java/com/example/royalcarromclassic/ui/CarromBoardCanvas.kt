@@ -1,5 +1,6 @@
 package com.example.royalcarromclassic.ui
 
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -22,8 +23,8 @@ import kotlin.math.*
 
 /**
  * High-performance, isolated Carrom Board Canvas.
- * Collects physics ticks internally to isolate recompositions from the outer UI hierarchy.
- * Caches gradients, brushes, and path effects to achieve zero-allocation 60-120 FPS rendering.
+ * Delivers silky-smooth 60-120 FPS rendering, zero-allocation frame draws,
+ * animated laser trajectory beams, elastic slingshot mechanics, and tactile 3D piece rendering.
  */
 @Composable
 fun CarromBoardCanvas(
@@ -39,13 +40,35 @@ fun CarromBoardCanvas(
     onShoot: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // Collect physics tick exclusively in this isolated composable scope
+    // Collect physics tick exclusively in this isolated canvas scope
     val physicsTick by physicsTickFlow.collectAsState()
 
     var pullTouchPos by remember { mutableStateOf<Offset?>(null) }
     var isPullingStriker by remember { mutableStateOf(false) }
 
-    // Pre-cache brushes and path effects per board theme & striker config
+    // Animated dash phase for flowing laser trajectory beam
+    val infiniteTransition = rememberInfiniteTransition(label = "CanvasLaserAnim")
+    val dashPhase by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 24f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(600, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "LaserDashPhase"
+    )
+
+    val pulseGlow by infiniteTransition.animateFloat(
+        initialValue = 0.4f,
+        targetValue = 0.85f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(900, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "StrikerGlowPulse"
+    )
+
+    // Pre-cached brushes and path effects
     val woodFrameBrush = remember(boardTheme.woodColor, boardTheme.woodInner) {
         Brush.linearGradient(
             colors = listOf(boardTheme.woodColor, boardTheme.woodInner, boardTheme.woodColor),
@@ -55,30 +78,29 @@ fun CarromBoardCanvas(
     }
 
     val feltBrush = remember(boardTheme.feltColor) {
-        val feltSize = BoardGeometry.PLAYABLE_MAX - BoardGeometry.PLAYABLE_MIN
         Brush.radialGradient(
-            colors = listOf(boardTheme.feltColor, boardTheme.feltColor.copy(alpha = 0.88f)),
+            colors = listOf(boardTheme.feltColor, boardTheme.feltColor.copy(alpha = 0.90f)),
             center = Offset(BoardGeometry.BOARD_SIZE / 2f, BoardGeometry.BOARD_SIZE / 2f),
-            radius = BoardGeometry.BOARD_SIZE * 0.7f
+            radius = BoardGeometry.BOARD_SIZE * 0.72f
         )
     }
 
-    val pocketCupBrush = remember {
-        Brush.radialGradient(
-            colors = listOf(Color(0xFF000000), Color(0xFF1E293B)),
-            center = Offset.Zero,
-            radius = BoardGeometry.POCKET_RADIUS
+    val feltLacquerGloss = remember {
+        Brush.linearGradient(
+            colors = listOf(Color.White.copy(alpha = 0.08f), Color.Transparent),
+            start = Offset(BoardGeometry.PLAYABLE_MIN, BoardGeometry.PLAYABLE_MIN),
+            end = Offset(BoardGeometry.BOARD_SIZE * 0.55f, BoardGeometry.BOARD_SIZE * 0.55f)
         )
     }
 
-    val dashedAimPathEffect = remember {
-        PathEffect.dashPathEffect(floatArrayOf(12f, 8f), 0f)
+    val dashedAimPathEffect = remember(dashPhase) {
+        PathEffect.dashPathEffect(floatArrayOf(14f, 10f), -dashPhase)
     }
-    val dashedTargetEffect = remember {
-        PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f)
+    val dashedTargetEffect = remember(dashPhase) {
+        PathEffect.dashPathEffect(floatArrayOf(10f, 8f), -dashPhase)
     }
     val pullStringEffect = remember {
-        PathEffect.dashPathEffect(floatArrayOf(8f, 5f), 0f)
+        PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f)
     }
 
     val s = striker
@@ -98,7 +120,8 @@ fun CarromBoardCanvas(
                 striker = s,
                 aimAngle = gameState.strikerAimAngle,
                 power = gameState.strikerPower,
-                pieces = pieces
+                pieces = pieces,
+                maxBounces = 3
             )
         } else {
             null
@@ -110,7 +133,7 @@ fun CarromBoardCanvas(
     val feltSize = remember { BoardGeometry.PLAYABLE_MAX - BoardGeometry.PLAYABLE_MIN }
     val feltRectSize = remember { Size(feltSize, feltSize) }
     val feltTopLeft = remember { Offset(BoardGeometry.PLAYABLE_MIN, BoardGeometry.PLAYABLE_MIN) }
-    val innerCushionStroke = remember { Stroke(width = 5f) }
+    val innerCushionStroke = remember { Stroke(width = 5.5f) }
 
     Canvas(
         modifier = modifier
@@ -131,7 +154,7 @@ fun CarromBoardCanvas(
 
                     if (abs(boardY - baselineY) < 55f) {
                         val fraction = (boardX - BoardGeometry.BASELINE_START_X) / BoardGeometry.BASELINE_WIDTH
-                        onPositionChanged(fraction.coerceIn(0f, 1f))
+                        onPositionChanged(fraction.coerceIn(0.06f, 0.94f))
                     } else if (striker != null) {
                         val dx = boardX - striker.x
                         val dy = boardY - striker.y
@@ -145,7 +168,7 @@ fun CarromBoardCanvas(
                     return@pointerInput
                 }
 
-                var dragMode = 0 // 0: None, 1: Baseline Slider Drag, 2: Pull & Release Aim
+                var dragMode = 0 // 0: None, 1: Baseline Slider, 2: Pull-to-Shoot Aim
 
                 detectDragGestures(
                     onDragStart = { offset ->
@@ -159,18 +182,18 @@ fun CarromBoardCanvas(
                         if (striker != null) {
                             val distToStriker = hypot(boardX - striker.x, boardY - striker.y)
 
-                            if (distToStriker < BoardGeometry.STRIKER_RADIUS + 40f) {
+                            if (distToStriker < BoardGeometry.STRIKER_RADIUS + 45f) {
                                 // Direct Touch on Striker -> Pull-to-Shoot mode
                                 dragMode = 2
                                 isPullingStriker = true
                                 pullTouchPos = Offset(boardX, boardY)
-                            } else if (abs(boardY - baselineY) < 40f && boardX >= BoardGeometry.BASELINE_START_X - 30f && boardX <= BoardGeometry.BASELINE_END_X + 30f) {
-                                // Touch along baseline rail -> Baseline Positioning
+                            } else if (abs(boardY - baselineY) < 42f && boardX >= BoardGeometry.BASELINE_START_X - 35f && boardX <= BoardGeometry.BASELINE_END_X + 35f) {
+                                // Baseline Rail positioning
                                 dragMode = 1
                                 val fraction = (boardX - BoardGeometry.BASELINE_START_X) / BoardGeometry.BASELINE_WIDTH
-                                onPositionChanged(fraction.coerceIn(0f, 1f))
+                                onPositionChanged(fraction.coerceIn(0.06f, 0.94f))
                             } else {
-                                // Touch on board -> Aim & Pull Mode
+                                // Touch anywhere on felt -> Smooth Laser Aim Mode
                                 dragMode = 2
                                 isPullingStriker = true
                                 pullTouchPos = Offset(boardX, boardY)
@@ -178,7 +201,7 @@ fun CarromBoardCanvas(
                                 val pullDy = boardY - striker.y
                                 val forwardAngle = atan2(-pullDy, -pullDx)
                                 val pullDist = hypot(pullDx, pullDy)
-                                val power = ((pullDist / 140f) * 100f).coerceIn(20f, 100f)
+                                val power = ((pullDist / 130f) * 100f).coerceIn(20f, 100f)
                                 onAimChanged(forwardAngle, power)
                             }
                         }
@@ -191,7 +214,7 @@ fun CarromBoardCanvas(
 
                         if (dragMode == 1) {
                             val fraction = (boardX - BoardGeometry.BASELINE_START_X) / BoardGeometry.BASELINE_WIDTH
-                            onPositionChanged(fraction.coerceIn(0f, 1f))
+                            onPositionChanged(fraction.coerceIn(0.06f, 0.94f))
                         } else if (dragMode == 2 && striker != null) {
                             pullTouchPos = Offset(boardX, boardY)
                             val pullDx = boardX - striker.x
@@ -199,14 +222,14 @@ fun CarromBoardCanvas(
                             val pullDist = hypot(pullDx, pullDy)
 
                             val forwardAngle = atan2(-pullDy, -pullDx)
-                            val calcPower = ((pullDist / 140f) * 100f).coerceIn(20f, 100f)
+                            val calcPower = ((pullDist / 130f) * 100f).coerceIn(20f, 100f)
                             onAimChanged(forwardAngle, calcPower)
                         }
                     },
                     onDragEnd = {
                         if (dragMode == 2 && striker != null && pullTouchPos != null) {
                             val pullDist = hypot(pullTouchPos!!.x - striker.x, pullTouchPos!!.y - striker.y)
-                            if (pullDist >= 16f) {
+                            if (pullDist >= 14f) {
                                 onShoot()
                             }
                         }
@@ -229,7 +252,7 @@ fun CarromBoardCanvas(
         withTransform({
             scale(scale, scale, pivot = Offset.Zero)
         }) {
-            // 1. Draw Wooden Frame (Cached Brush)
+            // 1. Wooden Outer Frame
             drawRoundRect(
                 brush = woodFrameBrush,
                 topLeft = Offset.Zero,
@@ -237,14 +260,21 @@ fun CarromBoardCanvas(
                 cornerRadius = frameCornerRadius
             )
 
-            // 2. Draw Felt Surface (Cached Brush)
+            // 2. Playable Felt Surface
             drawRect(
                 brush = feltBrush,
                 topLeft = feltTopLeft,
                 size = feltRectSize
             )
 
-            // Inner cushion border
+            // Board Lacquer Specular Sheen
+            drawRect(
+                brush = feltLacquerGloss,
+                topLeft = feltTopLeft,
+                size = feltRectSize
+            )
+
+            // Inner Cushion Border
             drawRect(
                 color = boardTheme.woodInner,
                 topLeft = feltTopLeft,
@@ -252,16 +282,16 @@ fun CarromBoardCanvas(
                 style = innerCushionStroke
             )
 
-            // 3. Draw Traditional Mandalas & Markings
+            // 3. Traditional Mandala & Baseline Markings
             drawMandalaMarkings(this, boardTheme)
 
-            // 4. Draw 4 Corner Pockets
+            // 4. Corner Pockets
             drawPockets(this, boardTheme)
 
-            // 5. Draw Particle effects
+            // 5. Particle Effects
             particles.draw(this)
 
-            // 6. Draw Elastic Slingshot Pull Band & Power Gauge (When pulling back)
+            // 6. Elastic Slingshot Pull Band & Dynamic Power Rings
             if (pullTouchPos != null && striker != null && !striker.isPocketed) {
                 val pull = pullTouchPos!!
                 val powerFrac = (gameState.strikerPower / 100f).coerceIn(0f, 1f)
@@ -272,47 +302,49 @@ fun CarromBoardCanvas(
                     else -> Color(0xFF22C55E)
                 }
 
-                // Elastic Pull String
+                // Elastic Pull Line
                 drawLine(
-                    color = tensionColor.copy(alpha = 0.85f),
+                    color = tensionColor.copy(alpha = 0.90f),
                     start = Offset(striker.x, striker.y),
                     end = pull,
                     strokeWidth = 4.5f,
                     pathEffect = pullStringEffect
                 )
 
-                // Touch Pull Anchor
-                drawCircle(color = tensionColor, radius = 9f, center = pull)
-                drawCircle(color = Color.White, radius = 4f, center = pull)
+                // Touch Anchor Glow
+                drawCircle(color = tensionColor.copy(alpha = 0.35f), radius = 14f, center = pull)
+                drawCircle(color = tensionColor, radius = 8f, center = pull)
+                drawCircle(color = Color.White, radius = 3.5f, center = pull)
 
-                // Tension Power Ring around Striker
+                // Tension Power Gauge Ring around Striker
                 drawCircle(
-                    color = tensionColor.copy(alpha = 0.5f),
-                    radius = striker.radius + 6f + (powerFrac * 10f),
+                    color = tensionColor.copy(alpha = 0.6f),
+                    radius = striker.radius + 6f + (powerFrac * 12f),
                     center = Offset(striker.x, striker.y),
-                    style = Stroke(width = 2.5f)
+                    style = Stroke(width = 3f)
                 )
             }
 
-            // 7. Draw Trajectory Line (from cached trajectory data)
+            // 7. Dynamic Trajectory Line
             if (trajectoryData != null) {
                 drawTrajectory(this, trajectoryData, strikerConfig, dashedAimPathEffect, dashedTargetEffect)
             }
 
-            // 8. Draw Carrom Pieces
+            // 8. Carrom Pieces (With 3D lacquered shading & dynamic drop shadows)
             val pieceCount = pieces.size
             for (i in 0 until pieceCount) {
                 drawCarromPiece(this, pieces[i])
             }
 
-            // 9. Draw Striker
+            // 9. Luxury 3D Striker
             if (striker != null && !striker.isPocketed) {
                 drawStrikerPiece(
                     this,
                     striker,
                     strikerConfig,
                     gameState.turnState == TurnState.AIMING || gameState.turnState == TurnState.PLACING_STRIKER,
-                    isPullingStriker
+                    isPullingStriker,
+                    pulseGlow
                 )
             }
         }
@@ -340,7 +372,7 @@ private fun drawMandalaMarkings(scope: DrawScope, theme: BoardTheme) {
         style = Stroke(width = 2f)
     )
 
-    // Center Queen Red Spot
+    // Center Queen Spot
     scope.drawCircle(
         color = theme.centerCircleColor,
         radius = BoardGeometry.CENTER_SMALL_CIRCLE_RADIUS,
@@ -410,22 +442,30 @@ private fun drawMandalaMarkings(scope: DrawScope, theme: BoardTheme) {
 
 private fun drawPockets(scope: DrawScope, theme: BoardTheme) {
     for (pocket in BoardGeometry.POCKETS) {
-        // Metallic Rim
+        // Metallic Outer Rim
         scope.drawCircle(
             color = theme.pocketRimColor,
-            radius = pocket.radius + 5f,
+            radius = pocket.radius + 5.5f,
             center = Offset(pocket.x, pocket.y)
         )
 
         // Deep Pocket Cup
         scope.drawCircle(
             brush = Brush.radialGradient(
-                colors = listOf(Color(0xFF000000), Color(0xFF1E293B)),
+                colors = listOf(Color(0xFF020617), Color(0xFF0F172A), Color(0xFF1E293B)),
                 center = Offset(pocket.x, pocket.y),
                 radius = pocket.radius
             ),
             radius = pocket.radius,
             center = Offset(pocket.x, pocket.y)
+        )
+
+        // Inner Shadow Ring
+        scope.drawCircle(
+            color = Color(0x66000000),
+            radius = pocket.radius,
+            center = Offset(pocket.x, pocket.y),
+            style = Stroke(width = 3f)
         )
     }
 }
@@ -438,41 +478,50 @@ private fun drawCarromPiece(scope: DrawScope, piece: Piece) {
 
     if (currentRadius <= 1f) return
 
-    // 3D Shadow
+    // 1. Dynamic Drop Shadow
+    val speed = hypot(piece.vx, piece.vy)
+    val shadowOffset = 3f + (speed * 0.15f).coerceAtMost(4f)
     scope.drawCircle(
-        color = Color(0x60000000),
-        radius = currentRadius,
-        center = Offset(piece.x + 3f, piece.y + 3f)
+        color = Color(0x60000000).copy(alpha = 0.38f * currentAlpha),
+        radius = currentRadius + 1f,
+        center = Offset(piece.x + shadowOffset, piece.y + shadowOffset)
     )
 
-    // Base Shaded Body
+    // 2. Base Shaded Body (3D Sphere/Disc bevel)
     scope.drawCircle(
         brush = Brush.radialGradient(
             colors = listOf(
-                Color.White.copy(alpha = 0.8f * currentAlpha),
+                Color.White.copy(alpha = 0.85f * currentAlpha),
                 piece.primaryColor.copy(alpha = currentAlpha),
                 piece.borderColor.copy(alpha = currentAlpha)
             ),
-            center = Offset(piece.x - currentRadius * 0.3f, piece.y - currentRadius * 0.3f),
+            center = Offset(piece.x - currentRadius * 0.32f, piece.y - currentRadius * 0.32f),
             radius = currentRadius
         ),
         radius = currentRadius,
         center = Offset(piece.x, piece.y)
     )
 
-    // Concentric Inlay Ring
+    // 3. Signature Engraved Inlay Ring
     scope.drawCircle(
-        color = (if (piece.type == PieceType.QUEEN) Color(0xFFFEF08A) else piece.borderColor).copy(alpha = currentAlpha),
-        radius = currentRadius * 0.55f,
+        color = (if (piece.type == PieceType.QUEEN) Color(0xFFFEF08A) else piece.borderColor).copy(alpha = currentAlpha * 0.9f),
+        radius = currentRadius * 0.58f,
         center = Offset(piece.x, piece.y),
-        style = Stroke(width = 1.5f)
+        style = Stroke(width = 1.6f)
     )
 
-    // Center Dot
+    // 4. Center Carved Dot
     scope.drawCircle(
         color = (if (piece.type == PieceType.QUEEN) Color(0xFFFEF08A) else piece.borderColor).copy(alpha = currentAlpha),
-        radius = currentRadius * 0.2f,
+        radius = currentRadius * 0.22f,
         center = Offset(piece.x, piece.y)
+    )
+
+    // 5. Specular Gloss Arc
+    scope.drawCircle(
+        color = Color.White.copy(alpha = 0.45f * currentAlpha),
+        radius = currentRadius * 0.28f,
+        center = Offset(piece.x - currentRadius * 0.3f, piece.y - currentRadius * 0.3f)
     )
 }
 
@@ -481,57 +530,63 @@ private fun drawStrikerPiece(
     striker: Piece,
     config: StrikerConfig,
     isActiveAim: Boolean,
-    isPulling: Boolean
+    isPulling: Boolean,
+    pulseAlpha: Float
 ) {
     val r = striker.radius
 
-    // Halo Glow when aiming
+    // 1. Luminous Pulsing Aura when Aiming
     if (isActiveAim) {
+        val glowRadius = r + (if (isPulling) 14f else 8f)
         scope.drawCircle(
-            color = (if (isPulling) Color(0xFFFBBF24) else config.glowColor).copy(alpha = if (isPulling) 0.6f else 0.35f),
-            radius = r + (if (isPulling) 12f else 7f),
+            color = (if (isPulling) Color(0xFFFBBF24) else config.glowColor).copy(alpha = if (isPulling) 0.65f else pulseAlpha * 0.5f),
+            radius = glowRadius,
             center = Offset(striker.x, striker.y)
         )
     }
 
-    // Shadow
+    // 2. 3D Drop Shadow
     scope.drawCircle(
-        color = Color(0x70000000),
-        radius = r,
-        center = Offset(striker.x + 4f, striker.y + 4f)
+        color = Color(0x75000000),
+        radius = r + 1f,
+        center = Offset(striker.x + 4.5f, striker.y + 4.5f)
     )
 
-    // Striker Body Gradient
+    // 3. Multi-Layered Striker Body Gradient
     scope.drawCircle(
         brush = Brush.radialGradient(
             colors = listOf(Color.White, config.primaryColor, config.secondaryColor),
-            center = Offset(striker.x - r * 0.35f, striker.y - r * 0.35f),
+            center = Offset(striker.x - r * 0.36f, striker.y - r * 0.36f),
             radius = r
         ),
         radius = r,
         center = Offset(striker.x, striker.y)
     )
 
-    // Metallic Outer Rim
+    // 4. Metallic Outer Rim
     scope.drawCircle(
         color = config.glowColor,
         radius = r,
         center = Offset(striker.x, striker.y),
-        style = Stroke(width = 2.5f)
+        style = Stroke(width = 2.8f)
     )
 
-    // Engraved Inner Ring
+    // 5. Engraved Inner Ring
     scope.drawCircle(
-        color = Color.White.copy(alpha = 0.7f),
+        color = Color.White.copy(alpha = 0.75f),
         radius = r * 0.65f,
         center = Offset(striker.x, striker.y),
-        style = Stroke(width = 1.5f)
+        style = Stroke(width = 1.6f)
     )
 
-    // Center Jewel
+    // 6. Central Embedded Gemstone
     scope.drawCircle(
-        color = config.glowColor,
-        radius = r * 0.25f,
+        brush = Brush.radialGradient(
+            colors = listOf(Color.White, config.glowColor, config.secondaryColor),
+            center = Offset(striker.x - r * 0.08f, striker.y - r * 0.08f),
+            radius = r * 0.28f
+        ),
+        radius = r * 0.28f,
         center = Offset(striker.x, striker.y)
     )
 }
@@ -546,13 +601,21 @@ private fun drawTrajectory(
     val path = trajectory.strikerPath
     if (path.size < 2) return
 
-    // 1. Striker Aim Beam
+    // 1. Flowing Laser Striker Aim Beam
     for (i in 0 until path.size - 1) {
+        // Outer glow
+        scope.drawLine(
+            color = config.trailColor.copy(alpha = 0.3f),
+            start = Offset(path[i].x, path[i].y),
+            end = Offset(path[i + 1].x, path[i + 1].y),
+            strokeWidth = 7f
+        )
+        // Laser core
         scope.drawLine(
             color = config.trailColor,
             start = Offset(path[i].x, path[i].y),
             end = Offset(path[i + 1].x, path[i + 1].y),
-            strokeWidth = 4f,
+            strokeWidth = 3.5f,
             pathEffect = aimDashEffect
         )
     }
@@ -561,32 +624,51 @@ private fun drawTrajectory(
     if (trajectory.targetHitGhostPos != null && trajectory.targetHitPiece != null) {
         val ghost = trajectory.targetHitGhostPos
         scope.drawCircle(
-            color = Color(0x40FBBF24),
+            color = Color(0x44FBBF24),
             radius = BoardGeometry.STRIKER_RADIUS,
             center = Offset(ghost.x, ghost.y)
         )
         scope.drawCircle(
-            color = Color.White.copy(alpha = 0.8f),
+            color = Color.White.copy(alpha = 0.9f),
             radius = BoardGeometry.STRIKER_RADIUS,
             center = Offset(ghost.x, ghost.y),
-            style = Stroke(width = 1.5f)
+            style = Stroke(width = 1.8f)
         )
 
-        // 3. Target Hit Piece Deflected Path
+        // 3. Target Hit Piece Predicted Deflection Arrow
         if (trajectory.targetPath.size >= 2) {
             val tPath = trajectory.targetPath
             scope.drawLine(
                 color = Color(0xFF22C55E),
                 start = Offset(tPath[0].x, tPath[0].y),
                 end = Offset(tPath[1].x, tPath[1].y),
-                strokeWidth = 3.5f,
+                strokeWidth = 4f,
                 pathEffect = targetDashEffect
             )
             scope.drawCircle(
-                color = Color(0x5022C55E),
+                color = Color(0x6022C55E),
                 radius = BoardGeometry.PUCK_RADIUS,
                 center = Offset(tPath[1].x, tPath[1].y)
+            )
+            scope.drawCircle(
+                color = Color(0xFF22C55E),
+                radius = BoardGeometry.PUCK_RADIUS,
+                center = Offset(tPath[1].x, tPath[1].y),
+                style = Stroke(width = 1.5f)
+            )
+        }
+
+        // 4. Striker Deflection Vector
+        if (trajectory.strikerDeflectPath.size >= 2) {
+            val sPath = trajectory.strikerDeflectPath
+            scope.drawLine(
+                color = Color(0xFFFBBF24).copy(alpha = 0.7f),
+                start = Offset(sPath[0].x, sPath[0].y),
+                end = Offset(sPath[1].x, sPath[1].y),
+                strokeWidth = 2.5f,
+                pathEffect = aimDashEffect
             )
         }
     }
 }
+

@@ -69,93 +69,118 @@ class SoundSynthesizer(private val context: Context? = null) : AudioEngine {
 
     private fun loadSynthesizedSounds(ctx: Context, pool: SoundPool) {
         try {
-            val cacheDir = File(ctx.cacheDir, "audio_synth")
+            val cacheDir = File(ctx.cacheDir, "audio_synth_v2")
             if (!cacheDir.exists()) cacheDir.mkdirs()
 
+            // 1. Authentic Carromite Wood Clack (Transient click + 3-stage harmonic body resonance)
             val clackFile = File(cacheDir, "clack.wav").apply {
-                if (!exists() || length() == 0L) writeBytes(generateWav(50) { i, total ->
+                if (!exists() || length() == 0L) writeBytes(generateWav(55) { i, total ->
                     val t = i.toFloat() / sampleRate
                     val progress = i.toFloat() / total
-                    val decay = (1f - progress).pow(3f)
-                    val freq = 620f * (1f - progress * 0.4f)
-                    val wave = sin(2f * PI.toFloat() * freq * t)
-                    (wave * decay * 28000f).toInt().toShort()
+                    val fastDecay = (1f - progress).pow(6f)
+                    val bodyDecay = (1f - progress).pow(2.8f)
+
+                    // Sharp transient click (2800Hz - 3600Hz)
+                    val click = sin(2f * PI.toFloat() * 3200f * t) * fastDecay * 0.45f
+                    // Fundamental wood body tone (760Hz)
+                    val f0 = sin(2f * PI.toFloat() * 760f * (1f - progress * 0.15f) * t) * bodyDecay * 0.65f
+                    // 2nd wood harmonic (1520Hz)
+                    val f1 = sin(2f * PI.toFloat() * 1520f * (1f - progress * 0.2f) * t) * bodyDecay * 0.35f
+                    // 3rd overtone (2280Hz)
+                    val f2 = sin(2f * PI.toFloat() * 2280f * t) * fastDecay * 0.2f
+
+                    val sample = (click + f0 + f1 + f2)
+                    (sample.coerceIn(-1f, 1f) * 29000f).toInt().toShort()
                 })
             }
             clackSoundId = pool.load(clackFile.absolutePath, 1)
 
+            // 2. Crisp Striker Flick (Transient Snap + Low-end release)
             val flickFile = File(cacheDir, "flick.wav").apply {
-                if (!exists() || length() == 0L) writeBytes(generateWav(80) { i, total ->
+                if (!exists() || length() == 0L) writeBytes(generateWav(75) { i, total ->
                     val t = i.toFloat() / sampleRate
                     val progress = i.toFloat() / total
-                    val decay = (1f - progress).pow(2f)
-                    val freq = 220f * (1f - progress * 0.7f)
-                    val wave = sin(2f * PI.toFloat() * freq * t)
-                    (wave * decay * 28000f).toInt().toShort()
+                    val snapDecay = (1f - progress).pow(4.5f)
+                    val releaseDecay = (1f - progress).pow(2.0f)
+
+                    val snap = sin(2f * PI.toFloat() * 1850f * (1f - progress * 0.5f) * t) * snapDecay * 0.6f
+                    val thud = sin(2f * PI.toFloat() * 260f * (1f - progress * 0.6f) * t) * releaseDecay * 0.5f
+
+                    val sample = snap + thud
+                    (sample.coerceIn(-1f, 1f) * 28000f).toInt().toShort()
                 })
             }
             flickSoundId = pool.load(flickFile.absolutePath, 1)
 
+            // 3. Deep Wooden Cushion Wall Rebound (Low-end frame thump with acoustic dampening)
             val wallFile = File(cacheDir, "wall.wav").apply {
-                if (!exists() || length() == 0L) writeBytes(generateWav(60) { i, total ->
+                if (!exists() || length() == 0L) writeBytes(generateWav(70) { i, total ->
                     val t = i.toFloat() / sampleRate
                     val progress = i.toFloat() / total
-                    val decay = (1f - progress).pow(2.5f)
-                    val freq = 140f * (1f - progress * 0.6f)
-                    val wave = sin(2f * PI.toFloat() * freq * t)
-                    (wave * decay * 24000f).toInt().toShort()
+                    val decay = (1f - progress).pow(2.4f)
+                    val f0 = sin(2f * PI.toFloat() * 145f * (1f - progress * 0.4f) * t) * 0.75f
+                    val f1 = sin(2f * PI.toFloat() * 320f * (1f - progress * 0.3f) * t) * 0.35f
+
+                    val sample = (f0 + f1) * decay
+                    (sample.coerceIn(-1f, 1f) * 26000f).toInt().toShort()
                 })
             }
             wallSoundId = pool.load(wallFile.absolutePath, 1)
 
+            // 4. Soft Hollow Pocket Drop (Velvet pocket pouch landing)
             val pocketFile = File(cacheDir, "pocket.wav").apply {
-                if (!exists() || length() == 0L) writeBytes(generateWav(120) { i, total ->
+                if (!exists() || length() == 0L) writeBytes(generateWav(130) { i, total ->
                     val t = i.toFloat() / sampleRate
                     val progress = i.toFloat() / total
-                    val decay = (1f - progress).pow(1.8f)
-                    val freq = 360f * (1f - progress * 0.5f)
-                    val wave = sin(2f * PI.toFloat() * freq * t)
-                    (wave * decay * 26000f).toInt().toShort()
+                    val decay = (1f - progress).pow(1.9f)
+                    val freq = 290f * (1f - progress * 0.45f)
+                    val wave = sin(2f * PI.toFloat() * freq * t) * 0.7f + sin(2f * PI.toFloat() * (freq * 0.5f) * t) * 0.4f
+
+                    val sample = wave * decay
+                    (sample.coerceIn(-1f, 1f) * 27000f).toInt().toShort()
                 })
             }
             pocketSoundId = pool.load(pocketFile.absolutePath, 1)
 
+            // 5. Bright Coin / Gem Chime
             val coinFile = File(cacheDir, "coin.wav").apply {
-                if (!exists() || length() == 0L) writeBytes(generateWav(120) { i, total ->
+                if (!exists() || length() == 0L) writeBytes(generateWav(140) { i, total ->
                     val t = i.toFloat() / sampleRate
                     val progress = i.toFloat() / total
                     val decay = 1f - progress
-                    val freq = if (progress < 0.4f) 987.77f else 1318.51f
-                    val wave = sin(2f * PI.toFloat() * freq * t)
-                    (wave * decay * 22000f).toInt().toShort()
+                    val freq = if (progress < 0.35f) 1046.50f else 1567.98f // C6 -> G6 harmonic
+                    val wave = sin(2f * PI.toFloat() * freq * t) + 0.3f * sin(2f * PI.toFloat() * (freq * 2f) * t)
+                    (wave * decay * 20000f).toInt().toShort()
                 })
             }
             coinSoundId = pool.load(coinFile.absolutePath, 1)
 
+            // 6. UI Soft Tap Click
             val clickFile = File(cacheDir, "click.wav").apply {
                 if (!exists() || length() == 0L) writeBytes(generateWav(25) { i, total ->
                     val t = i.toFloat() / sampleRate
-                    val decay = 1f - (i.toFloat() / total)
-                    val wave = sin(2f * PI.toFloat() * 850f * t)
-                    (wave * decay * 14000f).toInt().toShort()
+                    val decay = (1f - (i.toFloat() / total)).pow(2f)
+                    val wave = sin(2f * PI.toFloat() * 950f * t)
+                    (wave * decay * 16000f).toInt().toShort()
                 })
             }
             clickSoundId = pool.load(clickFile.absolutePath, 1)
 
+            // 7. Victory Fanfare Arpeggio
             val victoryFile = File(cacheDir, "victory.wav").apply {
-                if (!exists() || length() == 0L) writeBytes(generateWav(400) { i, total ->
+                if (!exists() || length() == 0L) writeBytes(generateWav(450) { i, total ->
                     val t = i.toFloat() / sampleRate
                     val progress = i.toFloat() / total
                     val noteIdx = (progress * 4).toInt().coerceIn(0, 3)
                     val freq = when (noteIdx) {
-                        0 -> 523.25f
-                        1 -> 659.25f
-                        2 -> 783.99f
-                        else -> 1046.50f
+                        0 -> 523.25f  // C5
+                        1 -> 659.25f  // E5
+                        2 -> 783.99f  // G5
+                        else -> 1046.50f // C6
                     }
                     val localProgress = (progress * 4f) - noteIdx
-                    val decay = (1f - localProgress).pow(1.5f)
-                    val wave = sin(2f * PI.toFloat() * freq * t)
+                    val decay = (1f - localProgress).pow(1.4f)
+                    val wave = sin(2f * PI.toFloat() * freq * t) + 0.25f * sin(2f * PI.toFloat() * (freq * 2f) * t)
                     (wave * decay * 22000f).toInt().toShort()
                 })
             }

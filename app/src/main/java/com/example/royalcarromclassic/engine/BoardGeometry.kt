@@ -15,6 +15,11 @@ object BoardGeometry {
     const val POCKET_RADIUS = 32f
     const val POCKET_SUCTION_RADIUS = 40f
 
+    /** Pre-computed math constants to avoid repeated conversions. */
+    const val HALF_PI = (Math.PI / 2.0).toFloat()
+    const val TWO_PI = (Math.PI * 2.0).toFloat()
+    const val DEG_TO_RAD = (Math.PI / 180.0).toFloat()
+
     const val CENTER_CIRCLE_RADIUS = 40f
     const val CENTER_SMALL_CIRCLE_RADIUS = 15f
     const val CENTER_OUTER_CIRCLE_RADIUS = 110f
@@ -22,11 +27,7 @@ object BoardGeometry {
     const val STRIKER_MASS = 3.0f
     const val PUCK_MASS = 1.0f
 
-    const val RESTITUTION_PUCK_PUCK = 0.94f
-    const val RESTITUTION_STRIKER_PUCK = 0.92f
-    const val RESTITUTION_WALL = 0.88f
-    const val FRICTION_COEFFICIENT = 0.988f
-    const val STOP_VELOCITY_THRESHOLD = 0.05f
+    // Physics constants are centralized in CarromPhysicsEngine (DRY)
 
     const val BASELINE_OFFSET_FROM_EDGE = 140f
     const val BASELINE_WIDTH = 420f

@@ -36,44 +36,28 @@ object CarromPhysicsEngine {
     const val VELOCITY_EPSILON = 0.06f
 
     fun generateClassicCluster(): List<Piece> {
-        val pieces = mutableListOf<Piece>()
+        val pieces = ArrayList<Piece>(19)
         val cx = BoardGeometry.BOARD_SIZE / 2f
         val cy = BoardGeometry.BOARD_SIZE / 2f
         val r = BoardGeometry.PUCK_RADIUS
         val gap = 0.35f
 
         // 1. Center Queen
-        pieces.add(
-            Piece(
-                id = "queen",
-                type = PieceType.QUEEN,
-                x = cx,
-                y = cy,
-                radius = r,
-                mass = BoardGeometry.PUCK_MASS,
-                primaryColor = Color(0xFFEF4444),
-                borderColor = Color(0xFFB91C1C),
-                points = 25
-            )
-        )
+        pieces.add(PieceFactory.createPiece("queen", PieceType.QUEEN, cx, cy))
 
         // 2. Inner ring: 6 pieces (3 White, 3 Black alternating)
         val d1 = (2f * r) + gap
+        val angleStep6 = BoardGeometry.TWO_PI / 6f
         for (i in 0 until 6) {
-            val angle = (i * PI.toFloat()) / 3f
-            val isWhite = i % 2 == 0
+            val angle = i * angleStep6
+            val isWhite = (i % 2 == 0)
             val type = if (isWhite) PieceType.WHITE else PieceType.BLACK
             pieces.add(
-                Piece(
+                PieceFactory.createPiece(
                     id = "inner_${i}_${type.name.lowercase()}",
                     type = type,
                     x = cx + cos(angle) * d1,
-                    y = cy + sin(angle) * d1,
-                    radius = r,
-                    mass = BoardGeometry.PUCK_MASS,
-                    primaryColor = if (isWhite) Color(0xFFF8FAFC) else Color(0xFF1E293B),
-                    borderColor = if (isWhite) Color(0xFF94A3B8) else Color(0xFF0F172A),
-                    points = if (isWhite) 10 else 5
+                    y = cy + sin(angle) * d1
                 )
             )
         }
@@ -81,43 +65,34 @@ object CarromPhysicsEngine {
         // 3. Outer ring: 12 pieces in hexagonal geometry (6 corners at 2*d1, 6 mid-edges at sqrt(3)*d1)
         val dCorner = 2f * d1
         val dEdge = sqrt(3.0).toFloat() * d1
+        val halfAngleStep = angleStep6 / 2f
 
         for (i in 0 until 6) {
             // Corner piece (angle = i * 60 deg)
-            val cornerAngle = (i * PI.toFloat()) / 3f
+            val cornerAngle = i * angleStep6
             val isCornerWhite = (i % 2 == 1)
             val cornerType = if (isCornerWhite) PieceType.WHITE else PieceType.BLACK
 
             pieces.add(
-                Piece(
+                PieceFactory.createPiece(
                     id = "outer_c_${i}_${cornerType.name.lowercase()}",
                     type = cornerType,
                     x = cx + cos(cornerAngle) * dCorner,
-                    y = cy + sin(cornerAngle) * dCorner,
-                    radius = r,
-                    mass = BoardGeometry.PUCK_MASS,
-                    primaryColor = if (isCornerWhite) Color(0xFFF8FAFC) else Color(0xFF1E293B),
-                    borderColor = if (isCornerWhite) Color(0xFF94A3B8) else Color(0xFF0F172A),
-                    points = if (isCornerWhite) 10 else 5
+                    y = cy + sin(cornerAngle) * dCorner
                 )
             )
 
             // Mid-edge piece (angle = i * 60 deg + 30 deg)
-            val edgeAngle = cornerAngle + (PI.toFloat() / 6f)
+            val edgeAngle = cornerAngle + halfAngleStep
             val isEdgeWhite = (i % 2 == 0)
             val edgeType = if (isEdgeWhite) PieceType.WHITE else PieceType.BLACK
 
             pieces.add(
-                Piece(
+                PieceFactory.createPiece(
                     id = "outer_e_${i}_${edgeType.name.lowercase()}",
                     type = edgeType,
                     x = cx + cos(edgeAngle) * dEdge,
-                    y = cy + sin(edgeAngle) * dEdge,
-                    radius = r,
-                    mass = BoardGeometry.PUCK_MASS,
-                    primaryColor = if (isEdgeWhite) Color(0xFFF8FAFC) else Color(0xFF1E293B),
-                    borderColor = if (isEdgeWhite) Color(0xFF94A3B8) else Color(0xFF0F172A),
-                    points = if (isEdgeWhite) 10 else 5
+                    y = cy + sin(edgeAngle) * dEdge
                 )
             )
         }
@@ -126,18 +101,7 @@ object CarromPhysicsEngine {
     }
 
     fun createStriker(fraction: Float = 0.5f, isBottom: Boolean = true): Piece {
-        val pos = BoardGeometry.getBaselineStrikerPos(fraction, isBottom)
-        return Piece(
-            id = "striker",
-            type = PieceType.STRIKER,
-            x = pos.x,
-            y = pos.y,
-            radius = BoardGeometry.STRIKER_RADIUS,
-            mass = BoardGeometry.STRIKER_MASS,
-            primaryColor = Color(0xFFFBBF24),
-            borderColor = Color(0xFFB45309),
-            points = 0
-        )
+        return PieceFactory.createStriker(fraction, isBottom)
     }
 
     /**

@@ -12,16 +12,16 @@ import kotlin.random.Random
  * Pre-allocated, zero-garbage particle entity.
  */
 class Particle {
-    var x: Float = 0f
-    var y: Float = 0f
-    var vx: Float = 0f
-    var vy: Float = 0f
-    var radius: Float = 2f
+    @JvmField var x: Float = 0f
+    @JvmField var y: Float = 0f
+    @JvmField var vx: Float = 0f
+    @JvmField var vy: Float = 0f
+    @JvmField var radius: Float = 2f
     var color: Color = Color(0xFFFBBF24)
-    var alpha: Float = 1.0f
-    var life: Int = 0
-    var maxLife: Int = 20
-    var isActive: Boolean = false
+    @JvmField var alpha: Float = 1.0f
+    @JvmField var life: Int = 0
+    @JvmField var maxLife: Int = 20
+    @JvmField var isActive: Boolean = false
 
     fun reset(
         newX: Float,
@@ -51,13 +51,18 @@ class Particle {
  * completely eliminating GC pauses and memory allocations during gameplay.
  */
 class ParticleSystem(private val maxCapacity: Int = 96) {
+    private companion object {
+        const val TWO_PI = (Math.PI * 2.0).toFloat()
+        const val VELOCITY_DAMPING = 0.94f
+    }
+
     private val pool: Array<Particle> = Array(maxCapacity) { Particle() }
     private var nextIndex: Int = 0
 
     fun spawnImpactSparks(x: Float, y: Float, color: Color = Color(0xFFFBBF24), count: Int = 6) {
         val clampedCount = count.coerceAtMost(maxCapacity)
         for (i in 0 until clampedCount) {
-            val angle = Random.nextFloat() * (2f * Math.PI.toFloat())
+            val angle = Random.nextFloat() * TWO_PI
             val speed = 1.2f + Random.nextFloat() * 3.6f
             val p = pool[nextIndex]
             nextIndex = (nextIndex + 1) % maxCapacity
@@ -77,7 +82,7 @@ class ParticleSystem(private val maxCapacity: Int = 96) {
     fun spawnCollisionDust(x: Float, y: Float, count: Int = 5) {
         val clampedCount = count.coerceAtMost(maxCapacity)
         for (i in 0 until clampedCount) {
-            val angle = Random.nextFloat() * (2f * Math.PI.toFloat())
+            val angle = Random.nextFloat() * TWO_PI
             val speed = 0.6f + Random.nextFloat() * 1.8f
             val p = pool[nextIndex]
             nextIndex = (nextIndex + 1) % maxCapacity
@@ -97,7 +102,7 @@ class ParticleSystem(private val maxCapacity: Int = 96) {
     fun spawnPocketVortex(x: Float, y: Float, color: Color = Color(0xFFF59E0B)) {
         val vortexCount = 12
         for (i in 0 until vortexCount) {
-            val angle = (i.toFloat() / vortexCount.toFloat()) * (2f * Math.PI.toFloat())
+            val angle = (i.toFloat() / vortexCount.toFloat()) * TWO_PI
             val dist = 28f + Random.nextFloat() * 8f
             val p = pool[nextIndex]
             nextIndex = (nextIndex + 1) % maxCapacity
@@ -122,8 +127,8 @@ class ParticleSystem(private val maxCapacity: Int = 96) {
             p.life++
             p.x += p.vx
             p.y += p.vy
-            p.vx *= 0.94f
-            p.vy *= 0.94f
+            p.vx *= VELOCITY_DAMPING
+            p.vy *= VELOCITY_DAMPING
             val progress = p.life.toFloat() / p.maxLife.toFloat()
             p.alpha = max(0f, (1f - progress) * (1f - progress))
 

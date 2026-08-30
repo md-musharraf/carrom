@@ -51,7 +51,7 @@ object CarromAIEngine {
         if (effectiveCandidates.isEmpty()) {
             return AIShotPlan(
                 baselineFraction = 0.5f,
-                aimAngle = PI.toFloat() / 2f,
+                aimAngle = BoardGeometry.HALF_PI,
                 power = 60f,
                 targetPiece = null,
                 targetPocketId = 2,
@@ -61,7 +61,7 @@ object CarromAIEngine {
 
         var bestShot = AIShotPlan(
             baselineFraction = 0.5f,
-            aimAngle = PI.toFloat() / 2f,
+            aimAngle = BoardGeometry.HALF_PI,
             power = 70f,
             targetPiece = effectiveCandidates.firstOrNull(),
             targetPocketId = 2,

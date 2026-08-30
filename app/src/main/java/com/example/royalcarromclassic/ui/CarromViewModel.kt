@@ -113,16 +113,21 @@ class CarromViewModel(
                 queenNeedsCover = false,
                 queenCovered = false,
                 strikerBaselineOffset = 0.5f,
-                strikerAimAngle = -Math.PI.toFloat() / 2f,
+                strikerAimAngle = -BoardGeometry.HALF_PI,
                 strikerPower = 50f
             )
         }
         _physicsTick.value++
     }
 
+    private fun isCurrentTurnBottom(): Boolean {
+        val state = _gameState.value
+        return state.currentTurn == "player1" || state.mode == GameMode.TRICK_SHOTS
+    }
+
     fun setStrikerBaselineOffset(fraction: Float, isManualTouch: Boolean = false) {
         val clamped = fraction.coerceIn(0.06f, 0.94f)
-        val isBottom = _gameState.value.currentTurn == "player1" || _gameState.value.mode == GameMode.TRICK_SHOTS
+        val isBottom = isCurrentTurnBottom()
         val pos = BoardGeometry.getBaselineStrikerPos(clamped, isBottom)
         _striker.value?.let {
             it.x = pos.x
@@ -147,7 +152,7 @@ class CarromViewModel(
     }
 
     fun nudgeAimAngle(deltaDegrees: Float) {
-        val rad = (deltaDegrees * Math.PI.toFloat()) / 180f
+        val rad = deltaDegrees * BoardGeometry.DEG_TO_RAD
         val newAngle = _gameState.value.strikerAimAngle + rad
         setStrikerAim(newAngle, _gameState.value.strikerPower)
         haptic.vibrateTick()
@@ -163,7 +168,7 @@ class CarromViewModel(
         val currentStriker = _striker.value ?: return
         if (_gameState.value.turnState == TurnState.MOVING || _gameState.value.isGameOver) return
 
-        val isBottom = _gameState.value.currentTurn == "player1" || _gameState.value.mode == GameMode.TRICK_SHOTS
+        val isBottom = isCurrentTurnBottom()
         val isFoul = BoardGeometry.isOverBaselineCircle(currentStriker.x, currentStriker.y, isBottom)
         if (isFoul) {
             // Auto-nudge to nearest safe position
@@ -388,7 +393,7 @@ class CarromViewModel(
                 currentTurn = nextTurn,
                 turnState = TurnState.PLACING_STRIKER,
                 strikerBaselineOffset = 0.5f,
-                strikerAimAngle = if (isNextBottom) -Math.PI.toFloat() / 2f else Math.PI.toFloat() / 2f,
+                strikerAimAngle = if (isNextBottom) -BoardGeometry.HALF_PI else BoardGeometry.HALF_PI,
                 strikerPower = 50f
             )
         }
@@ -420,7 +425,7 @@ class CarromViewModel(
             val sliderSteps = 16
             for (i in 1..sliderSteps) {
                 val t = i.toFloat() / sliderSteps.toFloat()
-                val easeT = (1f - cos(t * Math.PI.toFloat())) / 2f
+                val easeT = (1f - cos(t * kotlin.math.PI.toFloat())) / 2f
                 val frac = startFraction + (targetFraction - startFraction) * easeT
                 setStrikerBaselineOffset(frac, isManualTouch = false)
                 delay(14)
@@ -496,7 +501,7 @@ class CarromViewModel(
                 it.copy(
                     turnState = TurnState.PLACING_STRIKER,
                     strikerBaselineOffset = 0.5f,
-                    strikerAimAngle = -Math.PI.toFloat() / 2f
+                    strikerAimAngle = -BoardGeometry.HALF_PI
                 )
             }
             _physicsTick.value++
@@ -508,19 +513,7 @@ class CarromViewModel(
         trickShotCurrentShots = 0
         val level = _trickShotLevels.value.find { it.id == levelId } ?: return
 
-        val levelPieces = level.pieces.mapIndexed { idx, (type, pos) ->
-            Piece(
-                id = "trick_${level.id}_$idx",
-                type = type,
-                x = pos.x,
-                y = pos.y,
-                radius = BoardGeometry.PUCK_RADIUS,
-                mass = BoardGeometry.PUCK_MASS,
-                primaryColor = if (type == PieceType.QUEEN) Color(0xFFEF4444) else if (type == PieceType.WHITE) Color(0xFFF8FAFC) else Color(0xFF1E293B),
-                borderColor = if (type == PieceType.QUEEN) Color(0xFFB91C1C) else if (type == PieceType.WHITE) Color(0xFF94A3B8) else Color(0xFF0F172A),
-                points = if (type == PieceType.QUEEN) 25 else 10
-            )
-        }
+        val levelPieces = PieceFactory.createTrickShotPieces(level.id, level.pieces)
 
         val strikerPosFraction = (level.strikerPos.x - BoardGeometry.BASELINE_START_X) / BoardGeometry.BASELINE_WIDTH
         val newStriker = CarromPhysicsEngine.createStriker(strikerPosFraction, true)
@@ -536,7 +529,7 @@ class CarromViewModel(
                 currentTurn = "player1",
                 turnState = TurnState.PLACING_STRIKER,
                 strikerBaselineOffset = strikerPosFraction,
-                strikerAimAngle = -Math.PI.toFloat() / 2f,
+                strikerAimAngle = -BoardGeometry.HALF_PI,
                 strikerPower = 60f
             )
         }
@@ -545,19 +538,7 @@ class CarromViewModel(
 
     private fun loadTrickLevelPieces(levelId: Int): List<Piece> {
         val level = TrickShotsManager.LEVELS.find { it.id == levelId } ?: TrickShotsManager.LEVELS.first()
-        return level.pieces.mapIndexed { idx, (type, pos) ->
-            Piece(
-                id = "trick_${level.id}_$idx",
-                type = type,
-                x = pos.x,
-                y = pos.y,
-                radius = BoardGeometry.PUCK_RADIUS,
-                mass = BoardGeometry.PUCK_MASS,
-                primaryColor = if (type == PieceType.QUEEN) Color(0xFFEF4444) else if (type == PieceType.WHITE) Color(0xFFF8FAFC) else Color(0xFF1E293B),
-                borderColor = if (type == PieceType.QUEEN) Color(0xFFB91C1C) else if (type == PieceType.WHITE) Color(0xFF94A3B8) else Color(0xFF0F172A),
-                points = if (type == PieceType.QUEEN) 25 else 10
-            )
-        }
+        return PieceFactory.createTrickShotPieces(level.id, level.pieces)
     }
 
     private fun handleGameWin(isPlayer1Win: Boolean) {

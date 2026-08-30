@@ -2,48 +2,82 @@ package com.example.royalcarromclassic.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
+import com.example.royalcarromclassic.core.logging.AppLogger
 
 /**
- * Implementation of GameRepository backed by Android SharedPreferences.
+ * Secure implementation of GameRepository backed by EncryptedSharedPreferences.
+ * Prevents player data tampering (coin editing, score manipulation) via AES-256 encryption.
+ * Falls back to standard SharedPreferences if encryption is unavailable on the device.
  */
 class PreferencesManager(context: Context) : GameRepository {
-    private val prefs: SharedPreferences = context.getSharedPreferences("royal_carrom_prefs", Context.MODE_PRIVATE)
+
+    private val prefs: SharedPreferences = try {
+        val masterKey = MasterKey.Builder(context)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+
+        EncryptedSharedPreferences.create(
+            context,
+            "royal_carrom_secure_prefs",
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+    } catch (e: Exception) {
+        AppLogger.w("PreferencesManager", { "Encrypted prefs unavailable, using standard prefs" }, e)
+        context.getSharedPreferences("royal_carrom_prefs", Context.MODE_PRIVATE)
+    }
 
     override fun getPlayerStats(): PlayerStats {
         return PlayerStats(
-            coins = prefs.getInt("coins", 1200),
-            gems = prefs.getInt("gems", 25),
-            level = prefs.getInt("level", 1),
-            xp = prefs.getInt("xp", 0),
-            xpToNextLevel = prefs.getInt("xpToNextLevel", 100),
-            matchesPlayed = prefs.getInt("matchesPlayed", 0),
-            matchesWon = prefs.getInt("matchesWon", 0),
-            totalPockets = prefs.getInt("totalPockets", 0),
-            queenCovers = prefs.getInt("queenCovers", 0),
-            trickShotsCompleted = prefs.getInt("trickShotsCompleted", 0)
+            coins = prefs.getInt("coins", 1200).coerceAtLeast(0),
+            gems = prefs.getInt("gems", 25).coerceAtLeast(0),
+            level = prefs.getInt("level", 1).coerceIn(1, 999),
+            xp = prefs.getInt("xp", 0).coerceAtLeast(0),
+            xpToNextLevel = prefs.getInt("xpToNextLevel", 100).coerceIn(50, 100_000),
+            matchesPlayed = prefs.getInt("matchesPlayed", 0).coerceAtLeast(0),
+            matchesWon = prefs.getInt("matchesWon", 0).coerceAtLeast(0),
+            totalPockets = prefs.getInt("totalPockets", 0).coerceAtLeast(0),
+            queenCovers = prefs.getInt("queenCovers", 0).coerceAtLeast(0),
+            trickShotsCompleted = prefs.getInt("trickShotsCompleted", 0).coerceAtLeast(0)
         )
     }
 
     override fun savePlayerStats(stats: PlayerStats) {
+        // Validate before persisting to prevent corrupted data
+        val validatedStats = stats.copy(
+            coins = stats.coins.coerceIn(0, 999_999),
+            gems = stats.gems.coerceIn(0, 99_999),
+            level = stats.level.coerceIn(1, 999),
+            xp = stats.xp.coerceAtLeast(0),
+            xpToNextLevel = stats.xpToNextLevel.coerceIn(50, 100_000),
+            matchesPlayed = stats.matchesPlayed.coerceAtLeast(0),
+            matchesWon = stats.matchesWon.coerceIn(0, stats.matchesPlayed.coerceAtLeast(0))
+        )
+
         prefs.edit()
-            .putInt("coins", stats.coins)
-            .putInt("gems", stats.gems)
-            .putInt("level", stats.level)
-            .putInt("xp", stats.xp)
-            .putInt("xpToNextLevel", stats.xpToNextLevel)
-            .putInt("matchesPlayed", stats.matchesPlayed)
-            .putInt("matchesWon", stats.matchesWon)
-            .putInt("totalPockets", stats.totalPockets)
-            .putInt("queenCovers", stats.queenCovers)
-            .putInt("trickShotsCompleted", stats.trickShotsCompleted)
+            .putInt("coins", validatedStats.coins)
+            .putInt("gems", validatedStats.gems)
+            .putInt("level", validatedStats.level)
+            .putInt("xp", validatedStats.xp)
+            .putInt("xpToNextLevel", validatedStats.xpToNextLevel)
+            .putInt("matchesPlayed", validatedStats.matchesPlayed)
+            .putInt("matchesWon", validatedStats.matchesWon)
+            .putInt("totalPockets", validatedStats.totalPockets.coerceAtLeast(0))
+            .putInt("queenCovers", validatedStats.queenCovers.coerceAtLeast(0))
+            .putInt("trickShotsCompleted", validatedStats.trickShotsCompleted.coerceAtLeast(0))
             .apply()
     }
 
     override fun isUnlocked(itemId: String, defaultUnlocked: Boolean): Boolean {
+        if (itemId.isBlank()) return defaultUnlocked
         return prefs.getBoolean("unlocked_$itemId", defaultUnlocked)
     }
 
     override fun setUnlocked(itemId: String, unlocked: Boolean) {
+        if (itemId.isBlank()) return
         prefs.edit().putBoolean("unlocked_$itemId", unlocked).apply()
     }
 
@@ -52,6 +86,7 @@ class PreferencesManager(context: Context) : GameRepository {
     }
 
     override fun setSelectedStriker(id: String) {
+        if (id.isBlank()) return
         prefs.edit().putString("selected_striker", id).apply()
     }
 
@@ -60,17 +95,21 @@ class PreferencesManager(context: Context) : GameRepository {
     }
 
     override fun setSelectedBoard(id: String) {
+        if (id.isBlank()) return
         prefs.edit().putString("selected_board", id).apply()
     }
 
     override fun getTrickShotStars(levelId: Int): Int {
-        return prefs.getInt("trick_stars_$levelId", 0)
+        if (levelId < 1) return 0
+        return prefs.getInt("trick_stars_$levelId", 0).coerceIn(0, 3)
     }
 
     override fun setTrickShotStars(levelId: Int, stars: Int) {
+        if (levelId < 1) return
+        val validStars = stars.coerceIn(0, 3)
         val current = getTrickShotStars(levelId)
-        if (stars > current) {
-            prefs.edit().putInt("trick_stars_$levelId", stars).apply()
+        if (validStars > current) {
+            prefs.edit().putInt("trick_stars_$levelId", validStars).apply()
         }
     }
 }

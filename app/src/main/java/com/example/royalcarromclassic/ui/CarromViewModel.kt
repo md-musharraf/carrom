@@ -1,37 +1,50 @@
 package com.example.royalcarromclassic.ui
 
 import android.app.Application
-import androidx.compose.ui.graphics.Color
+import androidx.compose.runtime.State
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.royalcarromclassic.core.audio.AudioEngine
 import com.example.royalcarromclassic.core.audio.SoundSynthesizer
 import com.example.royalcarromclassic.core.haptics.HapticController
 import com.example.royalcarromclassic.core.haptics.HapticEngine
-import com.example.royalcarromclassic.core.logging.AppLogger
 import com.example.royalcarromclassic.data.*
 import com.example.royalcarromclassic.engine.*
-import kotlinx.coroutines.*
+import com.example.royalcarromclassic.online.*
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.math.cos
-import kotlin.math.hypot
+import kotlin.math.exp
 import kotlin.math.sin
 
 /**
- * Main ViewModel for Carrom game state, turn mechanics, physics loop, and rewards.
- * Designed with SOLID principles, loose coupling, and memory efficiency.
+ * Game state, turn flow, rewards and the frame-driven game loop.
+ *
+ * The UI calls [onFrame] once per display frame (vsync) while [needsFrames] is true. Physics,
+ * the bot's choreography and all board effects advance there, on the main thread, so the board
+ * is always drawn from a consistent state and motion is perfectly paced at any refresh rate.
+ *
+ * Online matches are server-authoritative: shots animate locally at once, then the board settles
+ * on the server's result. The opponent's shots are replayed from their inputs.
  */
-class CarromViewModel(
+class CarromViewModel @JvmOverloads constructor(
     application: Application,
     private val repository: GameRepository = PreferencesManager(application),
     val sound: AudioEngine = SoundSynthesizer(application),
-    val haptic: HapticEngine = HapticController(application)
+    val haptic: HapticEngine = HapticController(application),
+    private val online: OnlineMatchSource? = (application as? OnlineHost)?.online?.matches,
+    private val clock: () -> Long = System::currentTimeMillis
 ) : AndroidViewModel(application) {
 
-    val particles = ParticleSystem(maxCapacity = 64)
+    /** Particles, striker trail and placement bounce, drawn by the board canvas. */
+    val effects = BoardEffects()
 
     private val _gameState = MutableStateFlow(GameState())
     val gameState: StateFlow<GameState> = _gameState.asStateFlow()
@@ -42,8 +55,24 @@ class CarromViewModel(
     private val _striker = MutableStateFlow<Piece?>(null)
     val striker: StateFlow<Piece?> = _striker.asStateFlow()
 
-    private val _physicsTick = MutableStateFlow(0L)
-    val physicsTick: StateFlow<Long> = _physicsTick.asStateFlow()
+    private val _aimPreview = MutableStateFlow<CarromPhysicsEngine.TrajectoryData?>(null)
+    val aimPreview: StateFlow<CarromPhysicsEngine.TrajectoryData?> = _aimPreview.asStateFlow()
+
+    private val _boardSummary = MutableStateFlow(BoardSummary())
+    val boardSummary: StateFlow<BoardSummary> = _boardSummary.asStateFlow()
+
+    private val _needsFrames = MutableStateFlow(false)
+
+    /** True while anything on the board is animating; the UI runs its frame loop only then. */
+    val needsFrames: StateFlow<Boolean> = _needsFrames.asStateFlow()
+
+    private val _frameTick = mutableLongStateOf(0L)
+
+    /**
+     * Incremented after every simulated frame. Snapshot state (rather than a flow) so a draw
+     * that reads it is invalidated within the same frame the simulation advanced.
+     */
+    val frameTick: State<Long> get() = _frameTick
 
     private val _playerStats = MutableStateFlow(repository.getPlayerStats())
     val playerStats: StateFlow<PlayerStats> = _playerStats.asStateFlow()
@@ -60,504 +89,1008 @@ class CarromViewModel(
 
     private val _trickShotLevels = MutableStateFlow(
         TrickShotsManager.LEVELS.map {
-            val stars = repository.getTrickShotStars(it.id)
-            it.copy(stars = stars, isUnlocked = it.id == 1 || repository.getTrickShotStars(it.id - 1) > 0)
+            it.copy(
+                stars = repository.getTrickShotStars(it.id),
+                isUnlocked = it.id == 1 || repository.getTrickShotStars(it.id - 1) > 0
+            )
         }
     )
     val trickShotLevels: StateFlow<List<TrickShotLevel>> = _trickShotLevels.asStateFlow()
 
-    private var physicsJob: Job? = null
-    private var aiJob: Job? = null
-    private var trickShotCurrentShots = 0
+    private val aiDirector = AiShotDirector()
+    private val glide = PositionGlide()
+    private val pocketedThisShot = ArrayList<Piece>(8)
+    private var isSimulating = false
+    private var simulationSeconds = 0f
+    private var lastFrameNanos = 0L
+    private var lastBaselineDetent = -1
+    private var toastJob: Job? = null
+
+    /** A delayed turn action: the Blitz shot clock or the pause between Lucky Shot attempts. */
+    private var turnJob: Job? = null
+    private var emoteJob: Job? = null
+    private var aimRelayJob: Job? = null
+    private var lastAimRelayAt = 0L
+    private var emoteCounter = 0L
     private var currentTrickLevelId = 1
 
+    /** The online match being played, or null offline. */
+    private var session: OnlineSession? = null
+
     init {
-        val savedStriker = repository.getSelectedStriker()
-        val savedBoard = repository.getSelectedBoard()
         _gameState.update {
             it.copy(
-                selectedStrikerId = savedStriker,
-                selectedBoardId = savedBoard
+                selectedStrikerId = repository.getSelectedStriker(),
+                selectedBoardId = repository.getSelectedBoard()
             )
         }
         startNewGame(GameMode.VS_AI, AIDifficulty.MEDIUM)
+
+        if (online != null) {
+            viewModelScope.launch { online.events.collect { onRealtimeEvent(it) } }
+            // (Re)connecting: pick up a live match, e.g. after the app was closed mid-game.
+            viewModelScope.launch {
+                online.connection.collect { if (it == ConnectionState.ONLINE) resumeOnlineMatch() }
+            }
+        }
     }
+
+    // region Game loop
+
+    /** Called by the UI once per display frame while [needsFrames] is true. */
+    fun onFrame(frameTimeNanos: Long) {
+        val dt = if (lastFrameNanos == 0L) {
+            NOMINAL_FRAME_SECONDS
+        } else {
+            ((frameTimeNanos - lastFrameNanos) / 1_000_000_000f).coerceIn(0f, MAX_FRAME_SECONDS)
+        }
+        lastFrameNanos = frameTimeNanos
+        advanceFrame(dt)
+    }
+
+    /** Advances the whole game by [dtSeconds]; exposed for deterministic tests. */
+    internal fun advanceFrame(dtSeconds: Float) {
+        if (isSimulating) stepSimulation(dtSeconds)
+        val sinking = CarromPhysicsEngine.advancePocketDrops(_pieces.value, _striker.value, dtSeconds)
+        effects.advance(dtSeconds, _striker.value)
+        glide.advance(dtSeconds)
+        if (aiDirector.isActive) advanceAi(dtSeconds)
+        session?.remoteAim?.let { followRemoteAim(it, dtSeconds) }
+        _frameTick.longValue++
+        updateFrameDemand(sinking)
+    }
+
+    private fun updateFrameDemand(sinking: Boolean = false) {
+        val needed = isSimulating || sinking || aiDirector.isActive || effects.isAnimating ||
+            glide.isActive || session?.remoteAim != null
+        if (needed && !_needsFrames.value) lastFrameNanos = 0L
+        _needsFrames.value = needed
+    }
+
+    private fun requestFrames() = updateFrameDemand(sinking = true)
+
+    private fun stepSimulation(dtSeconds: Float) {
+        simulationSeconds += dtSeconds
+        val striker = _striker.value
+        val stillMoving = CarromPhysicsEngine.updatePhysics(
+            pieces = _pieces.value,
+            striker = striker,
+            dtSeconds = dtSeconds,
+            onClack = { intensity, x, y ->
+                sound.playClack(intensity)
+                if (intensity > 0.4f) haptic.vibrateCollision(intensity)
+                if (intensity > 0.25f) effects.particles.spawnCollisionDust(x, y, intensity, count = 3 + (intensity * 4).toInt())
+            },
+            onWall = { intensity, x, y ->
+                sound.playWall(intensity)
+                if (intensity > 0.5f) haptic.vibrateTick()
+                if (intensity > 0.35f) effects.particles.spawnCollisionDust(x, y, intensity * 0.6f, count = 3)
+            },
+            onPocket = { piece, pocket ->
+                pocketedThisShot.add(piece)
+                sound.playPocket()
+                haptic.vibratePocket()
+                effects.particles.spawnPocketVortex(pocket.x, pocket.y)
+                if (piece.type != PieceType.STRIKER) refreshBoardSummary()
+            }
+        )
+
+        if (stillMoving && simulationSeconds > MAX_SIMULATION_SECONDS) {
+            CarromPhysicsEngine.haltAll(_pieces.value, striker)
+        } else if (stillMoving) {
+            return
+        }
+        isSimulating = false
+        finishShot()
+    }
+
+    // endregion
+
+    // region Game setup
 
     fun startNewGame(mode: GameMode, difficulty: AIDifficulty = AIDifficulty.MEDIUM) {
-        physicsJob?.cancel()
-        aiJob?.cancel()
-        particles.clear()
-
-        val initialPieces = when (mode) {
-            GameMode.TRICK_SHOTS -> loadTrickLevelPieces(1)
-            else -> CarromPhysicsEngine.generateClassicCluster()
+        when (mode) {
+            GameMode.TRICK_SHOTS -> return startTrickShotLevel(currentTrickLevelId)
+            GameMode.LUCKY_SHOT -> return startLuckyShot()
+            // Online matches start from the lobby, when the server pairs two players.
+            GameMode.ONLINE -> return
+            else -> Unit
         }
-
-        val isBottom = true
-        val newStriker = CarromPhysicsEngine.createStriker(0.5f, isBottom)
-
-        _pieces.value = initialPieces
-        _striker.value = newStriker
-
+        resetBoard(CarromPhysicsEngine.generateClassicCluster())
+        val opponent = when (mode) {
+            GameMode.VS_AI, GameMode.BLITZ -> PlayerData("Bot Master", "AI")
+            else -> PlayerData("Player 2", "P2")
+        }
         _gameState.update {
-            it.copy(
-                mode = mode,
-                aiDifficulty = difficulty,
-                isGameOver = false,
-                winner = null,
-                currentTurn = "player1",
-                turnState = TurnState.PLACING_STRIKER,
-                player1 = PlayerData("Player 1", "👑", score = 0),
-                player2 = PlayerData(if (mode == GameMode.VS_AI) "Bot Master" else "Player 2", if (mode == GameMode.VS_AI) "🤖" else "🎯", score = 0),
-                queenPottedBy = null,
-                queenNeedsCover = false,
-                queenCovered = false,
-                strikerBaselineOffset = 0.5f,
-                strikerAimAngle = -BoardGeometry.HALF_PI,
-                strikerPower = 50f
+            it.freshMatch(mode).copy(aiDifficulty = difficulty, player2 = opponent)
+        }
+        startTurn(PlayerSlot.PLAYER1)
+        if (mode == GameMode.BLITZ) showToast("Blitz: first to ${CarromRules.BLITZ_TARGET} · ${BLITZ_SHOT_MILLIS / 1000}s a shot")
+    }
+
+    /** Replays the current match (or the current trick shot level) from the start. */
+    fun restartMatch() {
+        val state = _gameState.value
+        when (state.mode) {
+            GameMode.TRICK_SHOTS -> startTrickShotLevel(currentTrickLevelId)
+            GameMode.LUCKY_SHOT -> startLuckyShot()
+            GameMode.ONLINE -> Unit
+            else -> startNewGame(state.mode, state.aiDifficulty)
+        }
+    }
+
+    /** The next trick shot level, if it exists and is unlocked. */
+    fun nextTrickShotLevelId(): Int? =
+        _trickShotLevels.value.firstOrNull { it.id == currentTrickLevelId + 1 && it.isUnlocked }?.id
+
+    fun startTrickShotLevel(levelId: Int) {
+        val level = _trickShotLevels.value.find { it.id == levelId } ?: return
+        currentTrickLevelId = level.id
+        resetBoard(PieceFactory.createTrickShotPieces(level.id, level.pieces))
+
+        val offset = BoardGeometry.baselineFractionAt(level.strikerPos.x)
+        _gameState.update {
+            it.freshMatch(GameMode.TRICK_SHOTS).copy(
+                player2 = PlayerData("Trick Shot", "#${level.id}"),
+                trickShot = TrickShotStatus(level.id, level.title, level.hint, shotsTaken = 0, maxShots = level.maxShots)
             )
         }
-        _physicsTick.value++
+        startTurn(PlayerSlot.PLAYER1, offset = offset, power = 60f)
+        showToast("Level ${level.id}: ${level.title}")
     }
 
-    private fun isCurrentTurnBottom(): Boolean {
-        val state = _gameState.value
-        return state.currentTurn == "player1" || state.mode == GameMode.TRICK_SHOTS
+    /** Lucky Shot attempts left today. */
+    fun luckyShotsLeft(): Int =
+        (LuckyShot.DAILY_ATTEMPTS - repository.getDailyCount(LuckyShot.COUNTER, LuckyShot.dayIndex(clock()))).coerceAtLeast(0)
+
+    fun startLuckyShot() {
+        val left = luckyShotsLeft()
+        if (left == 0) {
+            showToast("No Lucky Shots left today. Come back tomorrow!")
+            return
+        }
+        resetBoard(LuckyShot.setup())
+        _gameState.update {
+            it.freshMatch(GameMode.LUCKY_SHOT).copy(
+                player2 = PlayerData("Lucky Shot", "LS"),
+                luckyShot = LuckyShotStatus(attemptsLeft = left)
+            )
+        }
+        startTurn(PlayerSlot.PLAYER1)
+        showToast("Send the lucky disc into the rings!")
     }
+
+    /** State for a new match of [mode]: scores, queen, challenges and online details reset. */
+    private fun GameState.freshMatch(mode: GameMode) = copy(
+        mode = mode,
+        isGameOver = false,
+        winner = null,
+        player1 = PlayerData("Player 1", "P1"),
+        player2 = PlayerData("Player 2", "P2"),
+        queenPottedBy = null,
+        queenNeedsCover = false,
+        queenCovered = false,
+        trickShot = null,
+        luckyShot = null,
+        online = null,
+        turnClock = null,
+        toastMessage = null
+    )
+
+    private fun resetBoard(pieces: List<Piece>) {
+        abandonOnlineMatch()
+        aiDirector.cancel()
+        glide.cancel()
+        turnJob?.cancel()
+        isSimulating = false
+        pocketedThisShot.clear()
+        effects.clear()
+        _pieces.value = pieces
+        refreshBoardSummary()
+    }
+
+    private fun startTurn(
+        slot: PlayerSlot,
+        offset: Float = 0.5f,
+        power: Float = BoardGeometry.DEFAULT_POWER
+    ) {
+        val isBottom = slot == PlayerSlot.PLAYER1
+        _striker.value = PieceFactory.createStriker(offset, isBottom)
+        effects.onStrikerPlaced()
+        _gameState.update {
+            it.copy(
+                currentTurn = slot,
+                turnState = TurnState.PLACING_STRIKER,
+                strikerBaselineOffset = offset,
+                strikerAimAngle = BoardGeometry.forwardAngle(isBottom),
+                strikerPower = power
+            )
+        }
+        refreshAimPreview()
+        if (_gameState.value.mode == GameMode.BLITZ) startShotClock(slot)
+        if (_gameState.value.isAiTurn) scheduleAIShot()
+        requestFrames()
+    }
+
+    // endregion
+
+    // region Striker controls
 
     fun setStrikerBaselineOffset(fraction: Float, isManualTouch: Boolean = false) {
-        val clamped = fraction.coerceIn(0.06f, 0.94f)
-        val isBottom = isCurrentTurnBottom()
-        val pos = BoardGeometry.getBaselineStrikerPos(clamped, isBottom)
+        val state = _gameState.value
+        if (state.isGameOver || state.turnState == TurnState.MOVING) return
+        val clamped = fraction.coerceIn(BoardGeometry.MIN_BASELINE_FRACTION, BoardGeometry.MAX_BASELINE_FRACTION)
+        val pos = BoardGeometry.getBaselineStrikerPos(clamped, state.isBottomTurn)
         _striker.value?.let {
             it.x = pos.x
             it.y = pos.y
         }
         if (isManualTouch) {
-            haptic.vibrateTick()
+            // Notched-rail feel: one soft tick per detent instead of a continuous buzz.
+            val detent = (clamped * BASELINE_DETENTS).toInt()
+            if (detent != lastBaselineDetent) haptic.vibrateTick()
+            lastBaselineDetent = detent
         }
         _gameState.update { it.copy(strikerBaselineOffset = clamped) }
-        _physicsTick.value++
+        refreshAimPreview()
+        relayAim()
+        _frameTick.longValue++
     }
 
     fun setStrikerAim(angle: Float, power: Float) {
+        val state = _gameState.value
+        if (state.isGameOver || state.turnState == TurnState.MOVING) return
         _gameState.update {
             it.copy(
-                strikerAimAngle = angle,
-                strikerPower = power.coerceIn(20f, 100f),
+                strikerAimAngle = BoardGeometry.normalizeAngle(angle),
+                strikerPower = power.coerceIn(BoardGeometry.MIN_POWER, BoardGeometry.MAX_POWER),
                 turnState = TurnState.AIMING
             )
         }
-        _physicsTick.value++
+        refreshAimPreview()
+        relayAim()
     }
 
     fun nudgeAimAngle(deltaDegrees: Float) {
-        val rad = deltaDegrees * BoardGeometry.DEG_TO_RAD
-        val newAngle = _gameState.value.strikerAimAngle + rad
-        setStrikerAim(newAngle, _gameState.value.strikerPower)
+        val state = _gameState.value
+        setStrikerAim(state.strikerAimAngle + deltaDegrees * BoardGeometry.DEG_TO_RAD, state.strikerPower)
         haptic.vibrateTick()
     }
 
     fun nudgePower(delta: Float) {
-        val newPower = (_gameState.value.strikerPower + delta).coerceIn(20f, 100f)
-        setStrikerAim(_gameState.value.strikerAimAngle, newPower)
+        val state = _gameState.value
+        setStrikerAim(state.strikerAimAngle, state.strikerPower + delta)
         haptic.vibrateTick()
     }
 
     fun executeShot() {
-        val currentStriker = _striker.value ?: return
-        if (_gameState.value.turnState == TurnState.MOVING || _gameState.value.isGameOver) return
+        val state = _gameState.value
+        val striker = _striker.value ?: return
+        if (state.isGameOver || state.turnState == TurnState.MOVING || striker.isPocketed ||
+            state.isRemoteTurn || state.online?.syncing == true
+        ) return
+        launchStriker(activeStrikerConfig().powerMultiplier)
+        session?.let(::sendOnlineShot)
+    }
 
-        val isBottom = isCurrentTurnBottom()
-        val isFoul = BoardGeometry.isOverBaselineCircle(currentStriker.x, currentStriker.y, isBottom)
-        if (isFoul) {
-            // Auto-nudge to nearest safe position
-            val safeFrac = if (currentStriker.x < BoardGeometry.BOARD_SIZE / 2f) 0.12f else 0.88f
-            val pos = BoardGeometry.getBaselineStrikerPos(safeFrac, isBottom)
-            currentStriker.x = pos.x
-            currentStriker.y = pos.y
-            _gameState.update { it.copy(strikerBaselineOffset = safeFrac) }
+    /** Fires the striker with the current aim; shared by local shots and replayed online shots. */
+    private fun launchStriker(powerMultiplier: Float) {
+        val striker = _striker.value ?: return
+        val bottom = _gameState.value.isBottomTurn
+        if (BoardGeometry.isOverBaselineCircle(striker.x, striker.y, bottom)) {
+            // Auto-nudge off the foul circle to the nearest legal spot (the server does the same).
+            val safe = if (striker.x < BoardGeometry.CENTER) 0.12f else 0.88f
+            val pos = BoardGeometry.getBaselineStrikerPos(safe, bottom)
+            striker.x = pos.x
+            striker.y = pos.y
+            _gameState.update { it.copy(strikerBaselineOffset = safe) }
         }
+        val state = _gameState.value
+        val speed = (state.strikerPower / 100f) * CarromPhysicsEngine.MAX_STRIKE_SPEED * powerMultiplier
+        striker.vx = cos(state.strikerAimAngle) * speed
+        striker.vy = sin(state.strikerAimAngle) * speed
 
-        // Get striker power multiplier
-        val activeStrikerConfig = _strikers.value.find { it.id == _gameState.value.selectedStrikerId }
-        val mult = activeStrikerConfig?.powerMultiplier ?: 1.0f
-
-        val speed = (_gameState.value.strikerPower / 100f) * 34f * mult
-        currentStriker.vx = cos(_gameState.value.strikerAimAngle) * speed
-        currentStriker.vy = sin(_gameState.value.strikerAimAngle) * speed
-
-        sound.playFlick(_gameState.value.strikerPower)
+        sound.playFlick(state.strikerPower)
         haptic.vibrateStrike()
 
-        _gameState.update { it.copy(turnState = TurnState.MOVING) }
-
-        if (_gameState.value.mode == GameMode.TRICK_SHOTS) {
-            trickShotCurrentShots++
-        }
-
-        startPhysicsSimulation()
-    }
-
-    private fun startPhysicsSimulation() {
-        physicsJob?.cancel()
-        physicsJob = viewModelScope.launch(Dispatchers.Default) {
-            val pocketedThisTurn = ArrayList<Piece>(4)
-            var isMoving = true
-            var lastTimeNanos = System.nanoTime()
-            var sparkFrameCounter = 0
-
-            while (isMoving && isActive) {
-                val nowNanos = System.nanoTime()
-                val dtSeconds = ((nowNanos - lastTimeNanos) / 1_000_000_000f).coerceIn(0.004f, 0.022f)
-                lastTimeNanos = nowNanos
-
-                val currentPieces = _pieces.value
-                val currentStriker = _striker.value
-
-                val result = CarromPhysicsEngine.updatePhysics(
-                    pieces = currentPieces,
-                    striker = currentStriker,
-                    dtSeconds = dtSeconds,
-                    onClack = { intensity ->
-                        sound.playClack(intensity)
-                        if (intensity > 0.4f) {
-                            haptic.vibrateCollision(intensity)
-                        }
-                        if (intensity > 0.65f && currentStriker != null && !currentStriker.isPocketed) {
-                            particles.spawnImpactSparks(currentStriker.x, currentStriker.y, Color(0xFFFDE68A), count = 3)
-                        }
-                    },
-                    onWall = { intensity ->
-                        sound.playWall(intensity)
-                        if (intensity > 0.5f) {
-                            haptic.vibrateTick()
-                        }
-                    },
-                    onPocket = {
-                        sound.playPocket()
-                        haptic.vibratePocket()
-                    }
-                )
-
-                val pocketedFrame = result.pocketedPieces
-                if (pocketedFrame.isNotEmpty()) {
-                    pocketedThisTurn.addAll(pocketedFrame)
-                    val pCount = pocketedFrame.size
-                    for (i in 0 until pCount) {
-                        val p = pocketedFrame[i]
-                        particles.spawnPocketVortex(p.x, p.y)
-                    }
-                }
-
-                particles.update()
-
-                // Striker velocity trail sparks (rate-limited for performance)
-                sparkFrameCounter++
-                if (sparkFrameCounter % 3 == 0 && currentStriker != null && !currentStriker.isPocketed) {
-                    val sSpeed = hypot(currentStriker.vx, currentStriker.vy)
-                    if (sSpeed > 7f) {
-                        particles.spawnImpactSparks(currentStriker.x, currentStriker.y, Color(0xFFFDE68A), count = 1)
-                    }
-                }
-
-                _physicsTick.value++
-                isMoving = result.anyMoving
-
-                delay(6) // Smooth 120Hz-ready physical clock tick
-            }
-
-            withContext(Dispatchers.Main) {
-                evaluateTurnEnd(pocketedThisTurn)
-            }
-        }
-    }
-
-    private fun evaluateTurnEnd(pocketedPieces: List<Piece>) {
-        val state = _gameState.value
-        val isPlayer1 = state.currentTurn == "player1"
-        val strikerPocketed = _striker.value?.isPocketed == true
-
-        var p1ScoreDelta = 0
-        var p2ScoreDelta = 0
-        var p1FoulDelta = 0
-        var p2FoulDelta = 0
-        var queenCoveredThisTurn = false
-        var repeatTurn = false
-
-        // 1. Striker Pocketed (Foul penalty)
-        if (strikerPocketed) {
-            if (isPlayer1) {
-                p1FoulDelta++
-                p1ScoreDelta -= 5
-            } else {
-                p2FoulDelta++
-                p2ScoreDelta -= 5
-            }
-            showToast("Foul! Striker pocketed (-5 pts)")
-        }
-
-        // 2. Score pocketed pieces
-        val regularPockets = pocketedPieces.filter { it.type != PieceType.STRIKER }
-
-        for (p in regularPockets) {
-            if (p.type == PieceType.QUEEN) {
-                _gameState.update {
-                    it.copy(
-                        queenPottedBy = if (isPlayer1) "player1" else "player2",
-                        queenNeedsCover = true
-                    )
-                }
-                showToast("Queen Potted! Pocket a cover disc to claim 25 pts!")
-                repeatTurn = true
-            } else {
-                val pts = if (p.type == PieceType.WHITE) 10 else 5
-                if (isPlayer1) p1ScoreDelta += pts else p2ScoreDelta += pts
-
-                // Check Queen Cover
-                if (state.queenNeedsCover && state.queenPottedBy == (if (isPlayer1) "player1" else "player2")) {
-                    queenCoveredThisTurn = true
-                    val queenBonus = 25
-                    if (isPlayer1) p1ScoreDelta += queenBonus else p2ScoreDelta += queenBonus
-                    _gameState.update { it.copy(queenNeedsCover = false, queenCovered = true) }
-                    showToast("Queen Covered! +25 Points Bonus!")
-                    repeatTurn = true
-                } else {
-                    repeatTurn = true
-                }
-            }
-        }
-
-        // If queen was potted previously but NOT covered in this turn, return queen to center
-        if (state.queenNeedsCover && regularPockets.none { it.type == PieceType.QUEEN } && !queenCoveredThisTurn) {
-            _gameState.update { it.copy(queenNeedsCover = false, queenPottedBy = null) }
-            val queen = _pieces.value.find { it.type == PieceType.QUEEN }
-            queen?.let {
-                it.isPocketed = false
-                it.x = BoardGeometry.BOARD_SIZE / 2f
-                it.y = BoardGeometry.BOARD_SIZE / 2f
-                it.vx = 0f
-                it.vy = 0f
-                it.pocketProgress = 1f
-            }
-            showToast("Queen Not Covered! Returned to center.")
-        }
-
-        // Apply scores
+        turnJob?.cancel()
+        glide.finish()
+        _aimPreview.value = null
+        effects.onShot()
+        pocketedThisShot.clear()
+        simulationSeconds = 0f
+        isSimulating = true
         _gameState.update {
             it.copy(
-                player1 = it.player1.copy(
-                    score = (it.player1.score + p1ScoreDelta).coerceAtLeast(0),
-                    fouls = it.player1.fouls + p1FoulDelta
-                ),
-                player2 = it.player2.copy(
-                    score = (it.player2.score + p2ScoreDelta).coerceAtLeast(0),
-                    fouls = it.player2.fouls + p2FoulDelta
-                )
+                turnState = TurnState.MOVING,
+                turnClock = null,
+                trickShot = it.trickShot?.let { t -> t.copy(shotsTaken = t.shotsTaken + 1) }
             )
         }
+        requestFrames()
+    }
 
-        // Check Trick Shots completion
-        if (state.mode == GameMode.TRICK_SHOTS) {
+    private fun refreshAimPreview() {
+        val state = _gameState.value
+        val striker = _striker.value
+        _aimPreview.value = if (striker != null && !striker.isPocketed && !state.isGameOver &&
+            state.turnState != TurnState.MOVING
+        ) {
+            val config = activeStrikerConfig()
+            CarromPhysicsEngine.calculateTrajectory(
+                striker = striker,
+                aimAngle = state.strikerAimAngle,
+                power = state.strikerPower,
+                pieces = _pieces.value,
+                powerMultiplier = config.powerMultiplier,
+                maxLength = CarromPhysicsEngine.DEFAULT_GUIDE_LENGTH * config.aimGuideLength
+            )
+        } else {
+            null
+        }
+    }
+
+    /** The striker in play: online, the one equipped on the player's account decides the physics. */
+    private fun activeStrikerConfig(): StrikerConfig {
+        val id = session?.myStrikerId ?: _gameState.value.selectedStrikerId
+        return _strikers.value.find { it.id == id } ?: _strikers.value.first()
+    }
+
+    // endregion
+
+    // region Turn evaluation
+
+    private fun finishShot() {
+        when (_gameState.value.mode) {
+            GameMode.ONLINE -> return finishOnlineShot()
+            GameMode.LUCKY_SHOT -> return finishLuckyShot()
+            else -> Unit
+        }
+        val state = _gameState.value
+        val shooter = state.currentTurn
+        val strikerPocketed = _striker.value?.isPocketed == true
+        val pocketedDiscs = pocketedThisShot.filter { it.type != PieceType.STRIKER }
+        pocketedThisShot.clear()
+
+        val outcome = CarromRules.evaluateShot(
+            shooter = shooter,
+            pocketed = pocketedDiscs.map { it.type },
+            strikerPocketed = strikerPocketed,
+            queen = QueenStatus(state.queenPottedBy, state.queenNeedsCover, state.queenCovered)
+        )
+
+        if (outcome.returnQueenToCenter) respotQueen()
+        outcome.announcement?.let(::showToast)
+        recordCareerStats(shooter, pocketedDiscs.size, outcome.queenCoveredNow)
+
+        _gameState.update {
+            val scored = it.player(shooter).let { p ->
+                p.copy(
+                    score = (p.score + outcome.scoreDelta).coerceAtLeast(0),
+                    fouls = p.fouls + if (outcome.isFoul) 1 else 0
+                )
+            }
+            val withScore = if (shooter == PlayerSlot.PLAYER1) it.copy(player1 = scored) else it.copy(player2 = scored)
+            withScore.copy(
+                queenPottedBy = outcome.queen.pottedBy,
+                queenNeedsCover = outcome.queen.awaitingCover,
+                queenCovered = outcome.queen.covered
+            )
+        }
+        refreshBoardSummary()
+
+        val updated = _gameState.value
+        if (updated.mode == GameMode.TRICK_SHOTS) {
             checkTrickShotCompletion()
             return
         }
 
-        // Check Game Over
-        val remainingActivePieces = _pieces.value.filter { !it.isPocketed }
-        if (remainingActivePieces.isEmpty() || (state.mode == GameMode.FREESTYLE && (state.player1.score >= 160 || state.player2.score >= 160))) {
-            val winner = if (state.player1.score >= state.player2.score) "player1" else "player2"
-            _gameState.update {
-                it.copy(
-                    isGameOver = true,
-                    winner = winner
-                )
-            }
-            handleGameWin(winner == "player1")
+        val winner = CarromRules.winnerOrNull(
+            mode = updated.mode,
+            discsLeft = _pieces.value.count { !it.isPocketed },
+            player1Score = updated.player1.score,
+            player2Score = updated.player2.score
+        )
+        if (winner != null) {
+            _gameState.update { it.copy(isGameOver = true, winner = winner) }
+            _aimPreview.value = null
+            handleGameEnd(winner == PlayerSlot.PLAYER1)
             return
         }
 
-        // Next Turn setup
-        val nextTurn = if (repeatTurn && !strikerPocketed) {
-            state.currentTurn
-        } else {
-            if (isPlayer1) (if (state.mode == GameMode.VS_AI) "ai" else "player2") else "player1"
+        startTurn(CarromRules.nextShooter(updated.mode, shooter, outcome.keepsTurn))
+    }
+
+    private fun respotQueen() {
+        val pieces = _pieces.value
+        val queen = pieces.find { it.type == PieceType.QUEEN } ?: return
+        val spot = CarromPhysicsEngine.findFreeSpot(pieces, queen.radius, ignore = queen)
+        queen.isPocketed = false
+        queen.pocketProgress = 1f
+        queen.pocketId = -1
+        queen.x = spot.x
+        queen.y = spot.y
+        queen.vx = 0f
+        queen.vy = 0f
+    }
+
+    private fun refreshBoardSummary() {
+        var whites = 0
+        var blacks = 0
+        var queen = false
+        for (p in _pieces.value) {
+            if (p.isPocketed) continue
+            when (p.type) {
+                PieceType.WHITE -> whites++
+                PieceType.BLACK -> blacks++
+                PieceType.QUEEN -> queen = true
+                PieceType.STRIKER -> Unit
+            }
         }
+        _boardSummary.value = BoardSummary(whites, blacks, queen)
+    }
 
-        val isNextBottom = nextTurn == "player1"
-        val nextStriker = CarromPhysicsEngine.createStriker(0.5f, isNextBottom)
-        _striker.value = nextStriker
-
-        _gameState.update {
+    private fun recordCareerStats(shooter: PlayerSlot, pocketed: Int, queenCovered: Boolean) {
+        if (shooter != PlayerSlot.PLAYER1 || (pocketed == 0 && !queenCovered)) return
+        _playerStats.update {
             it.copy(
-                currentTurn = nextTurn,
-                turnState = TurnState.PLACING_STRIKER,
-                strikerBaselineOffset = 0.5f,
-                strikerAimAngle = if (isNextBottom) -BoardGeometry.HALF_PI else BoardGeometry.HALF_PI,
-                strikerPower = 50f
+                totalPockets = it.totalPockets + pocketed,
+                queenCovers = it.queenCovers + if (queenCovered) 1 else 0
             )
-        }
-        _physicsTick.value++
-
-        // If next turn is AI, schedule AI aim and shoot routine
-        if (nextTurn == "ai" && state.mode == GameMode.VS_AI) {
-            scheduleAIShot()
         }
     }
 
     private fun scheduleAIShot() {
-        aiJob?.cancel()
-        aiJob = viewModelScope.launch {
-            delay(350) // Bot initial decision time
+        val state = _gameState.value
+        val plan = CarromAIEngine.calculateBestShot(
+            pieces = _pieces.value,
+            aiColor = state.player2.assignedColor,
+            queenNeedsCover = state.queenNeedsCover,
+            queenPottedByAI = state.queenPottedBy == PlayerSlot.PLAYER2,
+            difficulty = state.aiDifficulty
+        )
+        aiDirector.begin(
+            from = ShotAim(state.strikerBaselineOffset, state.strikerAimAngle, state.strikerPower),
+            to = ShotAim(plan.baselineFraction, plan.aimAngle, plan.power)
+        )
+    }
 
+    private fun advanceAi(dtSeconds: Float) {
+        val state = _gameState.value
+        if (!state.isAiTurn || state.isGameOver || state.turnState == TurnState.MOVING) {
+            aiDirector.cancel()
+            return
+        }
+        val release = aiDirector.advance(dtSeconds)
+        val aim = aiDirector.current
+        if (aim.baselineOffset != state.strikerBaselineOffset) setStrikerBaselineOffset(aim.baselineOffset)
+        if (aim.angle != state.strikerAimAngle || aim.power != state.strikerPower) setStrikerAim(aim.angle, aim.power)
+        if (release) executeShot()
+    }
+
+    /** Blitz: the human gets [BLITZ_SHOT_MILLIS] per shot; the bot keeps its own pace. */
+    private fun startShotClock(slot: PlayerSlot) {
+        turnJob?.cancel()
+        if (slot != PlayerSlot.PLAYER1) {
+            _gameState.update { it.copy(turnClock = null) }
+            return
+        }
+        _gameState.update { it.copy(turnClock = TurnClock(clock() + BLITZ_SHOT_MILLIS, BLITZ_SHOT_MILLIS / 1000f)) }
+        turnJob = viewModelScope.launch {
+            delay(BLITZ_SHOT_MILLIS)
             val state = _gameState.value
-            val shotPlan = CarromAIEngine.calculateBestShot(
-                pieces = _pieces.value,
-                aiColor = state.player2.assignedColor,
-                queenNeedsCover = state.queenNeedsCover,
-                queenPottedByAI = state.queenPottedBy == "player2",
-                difficulty = state.aiDifficulty
-            )
-
-            // Stage 1: Smooth baseline slider movement with cosine ease
-            val startFraction = state.strikerBaselineOffset
-            val targetFraction = shotPlan.baselineFraction
-            val sliderSteps = 16
-            for (i in 1..sliderSteps) {
-                val t = i.toFloat() / sliderSteps.toFloat()
-                val easeT = (1f - cos(t * kotlin.math.PI.toFloat())) / 2f
-                val frac = startFraction + (targetFraction - startFraction) * easeT
-                setStrikerBaselineOffset(frac, isManualTouch = false)
-                delay(14)
-            }
-
-            delay(120)
-
-            // Stage 2: Smooth aim rotation with cubic ease
-            val startAngle = _gameState.value.strikerAimAngle
-            val targetAngle = shotPlan.aimAngle
-            val aimSteps = 16
-            for (i in 1..aimSteps) {
-                val t = i.toFloat() / aimSteps.toFloat()
-                val easeT = t * t * (3f - 2f * t)
-                val curAngle = startAngle + (targetAngle - startAngle) * easeT
-                _gameState.update {
-                    it.copy(
-                        strikerAimAngle = curAngle,
-                        turnState = TurnState.AIMING
-                    )
-                }
-                _physicsTick.value++
-                delay(12)
-            }
-
-            // Stage 3: Smooth power pull-back windup
-            val targetPower = shotPlan.power
-            val powerSteps = 10
-            for (i in 1..powerSteps) {
-                val t = i.toFloat() / powerSteps.toFloat()
-                val curPower = 20f + (targetPower - 20f) * t
-                _gameState.update {
-                    it.copy(strikerPower = curPower)
-                }
-                _physicsTick.value++
-                delay(12)
-            }
-
-            delay(200) // Brief lock-on freeze before striking
-
-            // Stage 4: Execute Bot Strike
-            executeShot()
+            if (state.mode != GameMode.BLITZ || state.isGameOver || state.currentTurn != PlayerSlot.PLAYER1 ||
+                state.turnState == TurnState.MOVING
+            ) return@launch
+            haptic.vibrateStrike()
+            showToast("Shot clock! The turn passes")
+            startTurn(PlayerSlot.PLAYER2)
         }
     }
 
     private fun checkTrickShotCompletion() {
-        val remainingPieces = _pieces.value.filter { !it.isPocketed }
-        val currentLevel = _trickShotLevels.value.find { it.id == currentTrickLevelId } ?: return
+        val level = _trickShotLevels.value.find { it.id == currentTrickLevelId } ?: return
+        val shotsTaken = _gameState.value.trickShot?.shotsTaken ?: 0
+        val cleared = _pieces.value.none { !it.isPocketed && (it.type == PieceType.WHITE || it.type == PieceType.QUEEN) }
 
-        val isCleared = remainingPieces.none { it.type == PieceType.WHITE || it.type == PieceType.QUEEN }
-
-        if (isCleared) {
-            val stars = if (trickShotCurrentShots <= currentLevel.maxShots) 3 else 2
-            repository.setTrickShotStars(currentLevel.id, stars)
-            _trickShotLevels.update { list ->
-                list.map {
-                    if (it.id == currentLevel.id) it.copy(stars = stars)
-                    else if (it.id == currentLevel.id + 1) it.copy(isUnlocked = true)
-                    else it
+        when {
+            cleared -> {
+                val stars = if (shotsTaken <= level.maxShots) 3 else 2
+                val firstClear = level.stars == 0
+                repository.setTrickShotStars(level.id, stars)
+                _trickShotLevels.update { list ->
+                    list.map {
+                        when (it.id) {
+                            level.id -> it.copy(stars = maxOf(it.stars, stars))
+                            level.id + 1 -> it.copy(isUnlocked = true)
+                            else -> it
+                        }
+                    }
                 }
+                if (firstClear) _playerStats.update { it.copy(trickShotsCompleted = it.trickShotsCompleted + 1) }
+                awardRewards(coins = TRICK_SHOT_REWARD_COINS, xp = 50)
+                sound.playVictory()
+                showToast("Trick shot solved! +$TRICK_SHOT_REWARD_COINS coins")
+                _aimPreview.value = null
+                _gameState.update { it.copy(isGameOver = true, winner = PlayerSlot.PLAYER1) }
             }
-            awardRewards(coins = 300, xp = 50)
-            sound.playVictory()
-            showToast("Trick Shot Solved! ⭐⭐⭐ (+300 Coins)")
-            _gameState.update { it.copy(isGameOver = true, winner = "player1") }
-        } else if (trickShotCurrentShots >= currentLevel.maxShots) {
-            showToast("Out of shots! Try again.")
-            _gameState.update { it.copy(isGameOver = true, winner = "player2") }
-        } else {
-            val nextStriker = CarromPhysicsEngine.createStriker(0.5f, true)
-            _striker.value = nextStriker
-            _gameState.update {
-                it.copy(
-                    turnState = TurnState.PLACING_STRIKER,
-                    strikerBaselineOffset = 0.5f,
-                    strikerAimAngle = -BoardGeometry.HALF_PI
-                )
+
+            shotsTaken >= level.maxShots -> {
+                showToast("Out of shots — try again")
+                _aimPreview.value = null
+                _gameState.update { it.copy(isGameOver = true, winner = PlayerSlot.PLAYER2) }
             }
-            _physicsTick.value++
+
+            else -> startTurn(PlayerSlot.PLAYER1, offset = _gameState.value.strikerBaselineOffset, power = 60f)
         }
     }
 
-    fun startTrickShotLevel(levelId: Int) {
-        currentTrickLevelId = levelId
-        trickShotCurrentShots = 0
-        val level = _trickShotLevels.value.find { it.id == levelId } ?: return
+    private fun finishLuckyShot() {
+        pocketedThisShot.clear()
+        val disc = _pieces.value.firstOrNull { it.id == LuckyShot.DISC_ID } ?: return
+        val prize = LuckyShot.prizeFor(disc)
+        val day = LuckyShot.dayIndex(clock())
+        val used = repository.getDailyCount(LuckyShot.COUNTER, day) + 1
+        repository.setDailyCount(LuckyShot.COUNTER, day, used)
+        val left = (LuckyShot.DAILY_ATTEMPTS - used).coerceAtLeast(0)
 
-        val levelPieces = PieceFactory.createTrickShotPieces(level.id, level.pieces)
-
-        val strikerPosFraction = (level.strikerPos.x - BoardGeometry.BASELINE_START_X) / BoardGeometry.BASELINE_WIDTH
-        val newStriker = CarromPhysicsEngine.createStriker(strikerPosFraction, true)
-
-        _pieces.value = levelPieces
-        _striker.value = newStriker
-
+        awardRewards(coins = prize, xp = LUCKY_SHOT_XP)
+        if (!disc.isPocketed) effects.particles.spawnPocketVortex(disc.x, disc.y)
+        if (prize >= LuckyShot.RINGS[1].prize) sound.playVictory()
+        showToast(
+            when {
+                disc.isPocketed -> "Pocketed! +$prize coins"
+                prize >= LuckyShot.RINGS[0].prize -> "Bullseye! +$prize coins"
+                prize > LuckyShot.CONSOLATION -> "In the rings! +$prize coins"
+                else -> "So close. +$prize coins"
+            }
+        )
         _gameState.update {
+            it.copy(luckyShot = LuckyShotStatus(left, (it.luckyShot?.coinsWon ?: 0) + prize, prize))
+        }
+
+        if (left == 0) {
+            _aimPreview.value = null
+            _gameState.update { it.copy(isGameOver = true, winner = PlayerSlot.PLAYER1) }
+            return
+        }
+        // Let the result sink in, then set up the next attempt.
+        turnJob = viewModelScope.launch {
+            delay(LUCKY_SHOT_PAUSE_MILLIS)
+            if (_gameState.value.mode != GameMode.LUCKY_SHOT) return@launch
+            _pieces.value = LuckyShot.setup()
+            effects.clear()
+            refreshBoardSummary()
+            startTurn(PlayerSlot.PLAYER1)
+        }
+    }
+
+    private fun handleGameEnd(isPlayer1Win: Boolean) {
+        _playerStats.update {
             it.copy(
-                mode = GameMode.TRICK_SHOTS,
-                isGameOver = false,
-                winner = null,
-                currentTurn = "player1",
-                turnState = TurnState.PLACING_STRIKER,
-                strikerBaselineOffset = strikerPosFraction,
-                strikerAimAngle = -BoardGeometry.HALF_PI,
-                strikerPower = 60f
+                matchesPlayed = it.matchesPlayed + 1,
+                matchesWon = it.matchesWon + if (isPlayer1Win) 1 else 0
             )
         }
-        _physicsTick.value++
-    }
-
-    private fun loadTrickLevelPieces(levelId: Int): List<Piece> {
-        val level = TrickShotsManager.LEVELS.find { it.id == levelId } ?: TrickShotsManager.LEVELS.first()
-        return PieceFactory.createTrickShotPieces(level.id, level.pieces)
-    }
-
-    private fun handleGameWin(isPlayer1Win: Boolean) {
         if (isPlayer1Win) {
             sound.playVictory()
-            awardRewards(coins = 500, xp = 100)
-            _playerStats.update {
-                it.copy(
-                    matchesPlayed = it.matchesPlayed + 1,
-                    matchesWon = it.matchesWon + 1
-                )
-            }
+            awardRewards(coins = MATCH_WIN_COINS, xp = MATCH_WIN_XP)
         } else {
-            _playerStats.update {
-                it.copy(matchesPlayed = it.matchesPlayed + 1)
+            repository.savePlayerStats(_playerStats.value)
+        }
+    }
+
+    // endregion
+
+    // region Online match
+
+    /** Joins [snapshot]'s match (just paired, or resumed after reconnecting). */
+    private fun enterOnlineMatch(snapshot: SnapshotDto) {
+        val me = online?.playerId ?: return
+        val seat = snapshot.seats.indexOfFirst { it.playerId == me }
+        if (seat < 0 || snapshot.seats.size != 2) return
+        if (session?.matchId == snapshot.id) return onMatchUpdate(MatchUpdate.Sync(snapshot))
+
+        val view = SeatView(seat)
+        resetBoard(view.piecesOf(snapshot))
+        val mine = snapshot.seats[seat]
+        val theirs = snapshot.seats[1 - seat]
+        val next = OnlineSession(snapshot.id, view, mine.strikerId)
+        session = next
+        _gameState.update {
+            it.freshMatch(GameMode.ONLINE).copy(
+                online = OnlineMatchStatus(
+                    matchId = snapshot.id,
+                    ranked = snapshot.ranked,
+                    arena = snapshot.arena,
+                    myRating = mine.rating,
+                    opponentRating = theirs.rating,
+                    opponentPlayerId = theirs.playerId,
+                    opponentConnected = theirs.connected
+                )
+            )
+        }
+        applySnapshot(next, snapshot)
+        haptic.vibrateStrike()
+        showToast(
+            when {
+                snapshot.turn > 0 -> "Match resumed against ${theirs.name}"
+                snapshot.current == seat -> "You break first"
+                else -> "${theirs.name} breaks first"
+            }
+        )
+    }
+
+    private fun onRealtimeEvent(event: RealtimeEvent) {
+        when (event) {
+            is RealtimeEvent.MatchStarted -> enterOnlineMatch(localized(event.snapshot))
+            is RealtimeEvent.ShotPlayed ->
+                onMatchUpdate(MatchUpdate.Shot(event.shot.copy(snapshot = localized(event.shot.snapshot))))
+            is RealtimeEvent.TurnPassed ->
+                onMatchUpdate(MatchUpdate.Turn(event.turn.copy(snapshot = localized(event.turn.snapshot))))
+            is RealtimeEvent.MatchEnded -> onMatchUpdate(MatchUpdate.End(event.end))
+            is RealtimeEvent.OpponentAim -> onOpponentAim(event.aim)
+            is RealtimeEvent.Emote -> showEmote(event.emote)
+            is RealtimeEvent.Presence -> onPresence(event.presence)
+            // Friends, invites and the queue belong to the lobby.
+            else -> Unit
+        }
+    }
+
+    /** Re-expresses the snapshot's deadline on this device's clock, whatever its skew. */
+    private fun localized(snapshot: SnapshotDto): SnapshotDto {
+        val now = clock()
+        return snapshot.copy(deadline = now + (snapshot.deadline - snapshot.serverTime), serverTime = now)
+    }
+
+    private fun onMatchUpdate(update: MatchUpdate) {
+        val s = session ?: return
+        if (s.ended || update.snapshot.id != s.matchId) return
+        if (update is MatchUpdate.Shot && update.event.seat == s.view.mySeat && update.event.turn == s.shotInFlight) {
+            // The server's verdict on the shot already animating here.
+            s.confirmed = update.event
+            if (s.awaitingConfirmation) settleOwnShot(s)
+            return
+        }
+        // The server moved past the turn our shot was for without playing it (the clock ran out,
+        // or the match ended): stop waiting for a result that will never come.
+        val superseded = update is MatchUpdate.End || update.snapshot.turn > s.shotInFlight
+        if (s.shotInFlight != NO_TURN && s.confirmed == null && superseded) {
+            s.shotInFlight = NO_TURN
+            s.awaitingConfirmation = false
+        }
+        s.updates.addLast(update)
+        drainMatchUpdates()
+    }
+
+    /** Applies queued server updates in order, pausing while a shot animates or awaits its result. */
+    private fun drainMatchUpdates() {
+        val s = session ?: return
+        while (!isSimulating && !s.awaitingConfirmation && !s.ended) {
+            when (val update = s.updates.removeFirstOrNull() ?: return) {
+                is MatchUpdate.Shot -> if (update.event.turn >= s.turn) replayShot(s, update.event)
+                is MatchUpdate.Turn -> if (update.snapshot.turn > s.turn) {
+                    val mine = update.event.timedOutSeat == s.view.mySeat
+                    showToast(if (mine) "Time's up! Your turn passed" else "${_gameState.value.player2.name} ran out of time")
+                    applySnapshot(s, update.snapshot)
+                }
+                is MatchUpdate.Sync -> {
+                    val stuck = _gameState.value.turnState == TurnState.MOVING
+                    if (update.snapshot.turn > s.turn || stuck) applySnapshot(s, update.snapshot) else refreshMatchDetails(s, update.snapshot)
+                }
+                is MatchUpdate.End -> endOnlineMatch(s, update.event)
             }
         }
-        repository.savePlayerStats(_playerStats.value)
     }
+
+    /** Plays a shot the server has already resolved (the opponent's, or ours from another device). */
+    private fun replayShot(s: OnlineSession, shot: ShotEventDto) {
+        val aim = s.view.toLocal(shot.input)
+        val slot = s.view.slotOf(shot.seat)
+        val offset = aim.baselineOffset.coerceIn(BoardGeometry.MIN_BASELINE_FRACTION, BoardGeometry.MAX_BASELINE_FRACTION)
+        s.remoteAim = null
+        s.replaying = shot
+        _striker.value = PieceFactory.createStriker(offset, isBottom = slot == PlayerSlot.PLAYER1)
+        _gameState.update {
+            it.copy(currentTurn = slot, strikerBaselineOffset = offset, strikerAimAngle = aim.angle, strikerPower = aim.power)
+        }
+        launchStriker(shot.strikerPower)
+    }
+
+    private fun sendOnlineShot(s: OnlineSession) {
+        val source = online ?: return
+        val state = _gameState.value
+        val input = s.view.toServer(ShotAim(state.strikerBaselineOffset, state.strikerAimAngle, state.strikerPower))
+        val turn = s.turn
+        s.shotInFlight = turn
+        s.confirmed = null
+        aimRelayJob?.cancel()
+        viewModelScope.launch {
+            try {
+                source.shoot(s.matchId, turn, input)
+            } catch (e: ApiException) {
+                onShotRejected(s, turn, e)
+            }
+        }
+    }
+
+    private fun onShotRejected(s: OnlineSession, turn: Int, error: ApiException) {
+        if (session !== s || s.shotInFlight != turn) return
+        s.shotInFlight = NO_TURN
+        s.confirmed = null
+        showToast(error.message ?: "Shot not accepted")
+        requestResync()
+        if (s.awaitingConfirmation) {
+            s.awaitingConfirmation = false
+            drainMatchUpdates()
+        }
+    }
+
+    private fun finishOnlineShot() {
+        pocketedThisShot.clear()
+        val s = session ?: return
+        val replayed = s.replaying
+        when {
+            replayed != null -> {
+                s.replaying = null
+                applyShotResult(s, replayed)
+            }
+            s.confirmed != null -> return settleOwnShot(s)
+            s.shotInFlight != NO_TURN -> {
+                s.awaitingConfirmation = true
+                _gameState.update { it.copy(online = it.online?.copy(syncing = true)) }
+            }
+        }
+        drainMatchUpdates()
+    }
+
+    private fun settleOwnShot(s: OnlineSession) {
+        val shot = s.confirmed ?: return
+        s.confirmed = null
+        s.shotInFlight = NO_TURN
+        s.awaitingConfirmation = false
+        applyShotResult(s, shot)
+        drainMatchUpdates()
+    }
+
+    private fun applyShotResult(s: OnlineSession, shot: ShotEventDto) {
+        shot.result.announcement?.let(::showToast)
+        applySnapshot(s, shot.snapshot)
+    }
+
+    /** Moves the board, scores, queen and turn to the server's [snapshot]. */
+    private fun applySnapshot(s: OnlineSession, snapshot: SnapshotDto) {
+        if (!s.view.reconcile(_pieces.value, snapshot, glide)) {
+            glide.cancel()
+            _pieces.value = s.view.piecesOf(snapshot)
+        }
+        s.turn = snapshot.turn
+        s.remoteAim = null
+        refreshBoardSummary()
+        refreshMatchDetails(s, snapshot)
+        if (snapshot.phase == PHASE_PLAYING) startTurn(s.view.slotOf(snapshot.current)) else requestFrames()
+    }
+
+    /** Scores, queen, presence and shot clock from [snapshot], without touching the discs. */
+    private fun refreshMatchDetails(s: OnlineSession, snapshot: SnapshotDto) {
+        val mine = snapshot.seats[s.view.mySeat]
+        val theirs = snapshot.seats[1 - s.view.mySeat]
+        _gameState.update {
+            it.copy(
+                player1 = PlayerData(mine.name, SeatView.monogram(mine.name), mine.score, fouls = mine.fouls),
+                player2 = PlayerData(theirs.name, SeatView.monogram(theirs.name), theirs.score, fouls = theirs.fouls),
+                queenPottedBy = snapshot.queen.pottedBy?.let(s.view::slotOf),
+                queenNeedsCover = snapshot.queen.awaitingCover,
+                queenCovered = snapshot.queen.covered,
+                turnClock = if (snapshot.phase == PHASE_PLAYING) TurnClock(snapshot.deadline, snapshot.turnSeconds) else null,
+                online = it.online?.copy(syncing = false, opponentConnected = theirs.connected)
+            )
+        }
+    }
+
+    private fun endOnlineMatch(s: OnlineSession, end: EndEventDto) {
+        s.ended = true
+        s.updates.clear()
+        applySnapshot(s, end.snapshot)
+        val reward = end.rewards.getOrNull(s.view.mySeat)
+        val won = end.winner == s.view.mySeat
+        _aimPreview.value = null
+        _gameState.update {
+            it.copy(
+                isGameOver = true,
+                winner = s.view.slotOf(end.winner),
+                turnClock = null,
+                online = it.online?.copy(
+                    syncing = false,
+                    result = reward?.let { r -> OnlineResult(end.reason, r.coins, r.xp, r.ratingBefore, r.ratingAfter, r.leveledUp) }
+                )
+            )
+        }
+        if (won) sound.playVictory()
+    }
+
+    /** Our match finished while we were away (e.g. the opponent won on time). */
+    private fun endMissedMatch(s: OnlineSession) {
+        s.ended = true
+        s.updates.clear()
+        _aimPreview.value = null
+        _gameState.update { it.copy(isGameOver = true, winner = null, turnClock = null, online = it.online?.copy(syncing = false)) }
+        showToast("The match ended while you were away")
+    }
+
+    private fun resumeOnlineMatch() {
+        val source = online ?: return
+        viewModelScope.launch {
+            val snapshot = try {
+                source.resume()
+            } catch (e: ApiException) {
+                return@launch
+            }
+            val s = session
+            when {
+                snapshot != null && snapshot.phase == PHASE_PLAYING -> enterOnlineMatch(localized(snapshot))
+                s != null && !s.ended -> endMissedMatch(s)
+            }
+        }
+    }
+
+    /** Asks the server for the full match state, e.g. after it refused a shot. */
+    private fun requestResync() {
+        val source = online ?: return
+        val s = session ?: return
+        viewModelScope.launch {
+            val snapshot = try {
+                source.resume()
+            } catch (e: ApiException) {
+                return@launch // Reconnecting will resume the match.
+            }
+            if (session !== s) return@launch
+            if (snapshot == null || snapshot.id != s.matchId) endMissedMatch(s) else onMatchUpdate(MatchUpdate.Sync(localized(snapshot)))
+        }
+    }
+
+    private fun onOpponentAim(aim: AimEventDto) {
+        val s = session ?: return
+        val state = _gameState.value
+        if (s.ended || s.view.slotOf(aim.seat) != PlayerSlot.PLAYER2 || !state.isRemoteTurn ||
+            state.turnState == TurnState.MOVING || s.replaying != null
+        ) return
+        s.remoteAim = s.view.toLocal(ShotInputDto(aim.offset, aim.angle, aim.power))
+        requestFrames()
+    }
+
+    /** Eases the opponent's striker toward their latest aim, so 20 Hz updates look continuous. */
+    private fun followRemoteAim(target: ShotAim, dtSeconds: Float) {
+        val s = session ?: return
+        val state = _gameState.value
+        if (!state.isRemoteTurn || state.turnState == TurnState.MOVING) {
+            s.remoteAim = null
+            return
+        }
+        val k = 1f - exp(-dtSeconds * AIM_FOLLOW_RATE)
+        val turn = AiShotDirector.shortestTurn(state.strikerAimAngle, target.angle)
+        val arrived = abs(state.strikerBaselineOffset - target.baselineOffset) < 0.002f &&
+            abs(turn) < 0.003f && abs(state.strikerPower - target.power) < 0.3f
+        val aim = if (arrived) {
+            s.remoteAim = null
+            target
+        } else {
+            ShotAim(
+                AiShotDirector.lerp(state.strikerBaselineOffset, target.baselineOffset, k),
+                state.strikerAimAngle + turn * k,
+                AiShotDirector.lerp(state.strikerPower, target.power, k)
+            )
+        }
+        setStrikerBaselineOffset(aim.baselineOffset)
+        setStrikerAim(aim.angle, aim.power)
+    }
+
+    /** Shares our aim with the opponent, at most every [AIM_RELAY_MILLIS] (the last one always goes). */
+    private fun relayAim() {
+        val s = session ?: return
+        val source = online ?: return
+        val state = _gameState.value
+        if (s.ended || state.mode != GameMode.ONLINE || state.currentTurn != PlayerSlot.PLAYER1 || !state.canAim) return
+        if (aimRelayJob?.isActive == true) return // A pending send will carry the latest aim.
+        val wait = (lastAimRelayAt + AIM_RELAY_MILLIS - clock()).coerceAtLeast(0L)
+        aimRelayJob = viewModelScope.launch {
+            if (wait > 0) delay(wait)
+            lastAimRelayAt = clock()
+            val latest = _gameState.value
+            if (session !== s || !latest.canAim) return@launch
+            source.aim(s.matchId, s.view.toServer(ShotAim(latest.strikerBaselineOffset, latest.strikerAimAngle, latest.strikerPower)))
+        }
+    }
+
+    fun sendEmote(emote: String) {
+        val s = session ?: return
+        val source = online ?: return
+        viewModelScope.launch {
+            try {
+                source.emote(s.matchId, emote)
+            } catch (e: ApiException) {
+                showToast(e.message ?: "Couldn't send that")
+            }
+        }
+    }
+
+    private fun showEmote(event: EmoteEventDto) {
+        val s = session ?: return
+        val bubble = EmoteBubble(s.view.slotOf(event.seat), event.emote, ++emoteCounter)
+        _gameState.update { it.copy(online = it.online?.copy(emote = bubble)) }
+        if (bubble.slot == PlayerSlot.PLAYER2) haptic.vibrateTick()
+        emoteJob?.cancel()
+        emoteJob = viewModelScope.launch {
+            delay(EMOTE_MILLIS)
+            _gameState.update { if (it.online?.emote?.id == bubble.id) it.copy(online = it.online?.copy(emote = null)) else it }
+        }
+    }
+
+    private fun onPresence(presence: PresenceEventDto) {
+        val s = session ?: return
+        if (s.ended || s.view.slotOf(presence.seat) != PlayerSlot.PLAYER2) return
+        val name = _gameState.value.player2.name
+        _gameState.update { it.copy(online = it.online?.copy(opponentConnected = presence.connected)) }
+        showToast(if (presence.connected) "$name is back" else "$name lost connection")
+    }
+
+    /** Concedes the online match in progress. */
+    fun resignOnlineMatch() {
+        val s = session ?: return
+        val source = online ?: return
+        if (s.ended) return
+        viewModelScope.launch {
+            try {
+                source.resign(s.matchId)
+            } catch (e: ApiException) {
+                showToast(e.message ?: "Couldn't resign")
+            }
+        }
+    }
+
+    /** True while an online match is being played (not yet over). */
+    val isInLiveOnlineMatch: Boolean get() = session?.ended == false
+
+    /** Starting another game mid-match forfeits it, so the opponent isn't left waiting. */
+    private fun abandonOnlineMatch() {
+        val s = session ?: return
+        session = null
+        aimRelayJob?.cancel()
+        if (!s.ended) {
+            val source = online ?: return
+            viewModelScope.launch {
+                try {
+                    source.resign(s.matchId)
+                } catch (_: ApiException) {
+                    // The server forfeits it on the turn clock anyway.
+                }
+            }
+        }
+    }
+
+    // endregion
+
+    // region Rewards, shop & settings
 
     fun awardRewards(coins: Int, xp: Int) {
         sound.playCoin()
@@ -570,7 +1103,7 @@ class CarromViewModel(
             newXp -= nextLevelXp
             newLevel++
             nextLevelXp = (nextLevelXp * 1.3f).toInt()
-            showToast("LEVEL UP! Reached Level $newLevel! 🎉")
+            showToast("Level up! You reached level $newLevel")
         }
 
         val updated = current.copy(
@@ -583,48 +1116,54 @@ class CarromViewModel(
         repository.savePlayerStats(updated)
     }
 
-    fun buyStriker(striker: StrikerConfig) {
-        if (_playerStats.value.coins >= striker.price && !striker.isUnlocked) {
-            sound.playCoin()
-            val newStats = _playerStats.value.copy(coins = _playerStats.value.coins - striker.price)
-            _playerStats.value = newStats
-            repository.savePlayerStats(newStats)
-            repository.setUnlocked(striker.id, true)
+    /** True until today's free wheel spin has been used. */
+    fun canSpinToday(): Boolean = repository.getDailyCount(DailySpin.COUNTER, LuckyShot.dayIndex(clock())) == 0
 
-            _strikers.update { list ->
-                list.map { if (it.id == striker.id) it.copy(isUnlocked = true) else it }
-            }
-            selectStriker(striker.id)
-            showToast("Unlocked ${striker.name}!")
-        }
+    /**
+     * Uses today's spin: draws the prize, pays it and returns the winning segment, or null when
+     * today's spin is gone. Paid up front so closing the app mid-spin never loses the prize.
+     */
+    fun spinDailyWheel(): Int? {
+        if (!canSpinToday()) return null
+        repository.setDailyCount(DailySpin.COUNTER, LuckyShot.dayIndex(clock()), 1)
+        val index = DailySpin.draw()
+        awardRewards(coins = DailySpin.PRIZES[index], xp = 20)
+        return index
+    }
+
+    fun buyStriker(striker: StrikerConfig) {
+        if (!spendCoins(striker.price, striker.id, striker.isUnlocked)) return
+        _strikers.update { list -> list.map { if (it.id == striker.id) it.copy(isUnlocked = true) else it } }
+        selectStriker(striker.id)
+        showToast("Unlocked ${striker.name}")
     }
 
     fun buyBoard(board: BoardTheme) {
-        if (_playerStats.value.coins >= board.price && !board.isUnlocked) {
-            sound.playCoin()
-            val newStats = _playerStats.value.copy(coins = _playerStats.value.coins - board.price)
-            _playerStats.value = newStats
-            repository.savePlayerStats(newStats)
-            repository.setUnlocked(board.id, true)
+        if (!spendCoins(board.price, board.id, board.isUnlocked)) return
+        _boards.update { list -> list.map { if (it.id == board.id) it.copy(isUnlocked = true) else it } }
+        selectBoard(board.id)
+        showToast("Unlocked ${board.name}")
+    }
 
-            _boards.update { list ->
-                list.map { if (it.id == board.id) it.copy(isUnlocked = true) else it }
-            }
-            selectBoard(board.id)
-            showToast("Unlocked ${board.name}!")
-        }
+    private fun spendCoins(price: Int, itemId: String, alreadyUnlocked: Boolean): Boolean {
+        if (alreadyUnlocked || _playerStats.value.coins < price) return false
+        sound.playCoin()
+        val newStats = _playerStats.value.copy(coins = _playerStats.value.coins - price)
+        _playerStats.value = newStats
+        repository.savePlayerStats(newStats)
+        repository.setUnlocked(itemId, true)
+        return true
     }
 
     fun selectStriker(id: String) {
         repository.setSelectedStriker(id)
         _gameState.update { it.copy(selectedStrikerId = id) }
-        _physicsTick.value++
+        refreshAimPreview()
     }
 
     fun selectBoard(id: String) {
         repository.setSelectedBoard(id)
         _gameState.update { it.copy(selectedBoardId = id) }
-        _physicsTick.value++
     }
 
     fun toggleSound() {
@@ -639,20 +1178,79 @@ class CarromViewModel(
         _gameState.update { it.copy(hapticEnabled = next) }
     }
 
-    private fun showToast(msg: String) {
+    fun showToast(msg: String) {
         _gameState.update { it.copy(toastMessage = msg) }
-        viewModelScope.launch {
-            delay(2800)
-            if (_gameState.value.toastMessage == msg) {
-                _gameState.update { it.copy(toastMessage = null) }
-            }
+        toastJob?.cancel()
+        toastJob = viewModelScope.launch {
+            delay(TOAST_MILLIS)
+            _gameState.update { if (it.toastMessage == msg) it.copy(toastMessage = null) else it }
         }
     }
 
+    // endregion
+
     override fun onCleared() {
         super.onCleared()
-        physicsJob?.cancel()
-        aiJob?.cancel()
+        aiDirector.cancel()
         sound.release()
+    }
+
+    /** Server updates for the match in play, applied strictly in order. */
+    private sealed interface MatchUpdate {
+        val snapshot: SnapshotDto
+
+        data class Shot(val event: ShotEventDto) : MatchUpdate {
+            override val snapshot get() = event.snapshot
+        }
+
+        data class Turn(val event: TurnEventDto) : MatchUpdate {
+            override val snapshot get() = event.snapshot
+        }
+
+        data class End(val event: EndEventDto) : MatchUpdate {
+            override val snapshot get() = event.snapshot
+        }
+
+        data class Sync(override val snapshot: SnapshotDto) : MatchUpdate
+    }
+
+    /** Bookkeeping for one online match; dropped when the player leaves it. */
+    private class OnlineSession(val matchId: String, val view: SeatView, val myStrikerId: String) {
+        /** The server's turn counter for the turn now being played. */
+        var turn = 0
+
+        /** Turn number of our shot while it animates here awaiting the server, else [NO_TURN]. */
+        var shotInFlight = NO_TURN
+
+        /** The server's result for [shotInFlight], if it arrived before the local animation ended. */
+        var confirmed: ShotEventDto? = null
+
+        /** Our animation finished first; the board waits for [confirmed]. */
+        var awaitingConfirmation = false
+
+        /** A server-resolved shot being replayed on the board. */
+        var replaying: ShotEventDto? = null
+        val updates = ArrayDeque<MatchUpdate>()
+        var remoteAim: ShotAim? = null
+        var ended = false
+    }
+
+    private companion object {
+        const val NOMINAL_FRAME_SECONDS = 1f / 60f
+        const val MAX_FRAME_SECONDS = 1f / 20f
+        const val MAX_SIMULATION_SECONDS = 15f
+        const val BASELINE_DETENTS = 24
+        const val TOAST_MILLIS = 2600L
+        const val MATCH_WIN_COINS = 500
+        const val MATCH_WIN_XP = 100
+        const val TRICK_SHOT_REWARD_COINS = 300
+        const val BLITZ_SHOT_MILLIS = 10_000L
+        const val LUCKY_SHOT_XP = 5
+        const val LUCKY_SHOT_PAUSE_MILLIS = 1400L
+        const val EMOTE_MILLIS = 2800L
+        const val AIM_RELAY_MILLIS = 80L
+        const val AIM_FOLLOW_RATE = 16f
+        const val NO_TURN = -1
+        const val PHASE_PLAYING = "playing"
     }
 }

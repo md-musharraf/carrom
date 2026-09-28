@@ -1,138 +1,108 @@
 package com.example.royalcarromclassic.ui
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.*
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.example.royalcarromclassic.data.PlayerStats
+import com.example.royalcarromclassic.theme.CarromPalette
+import com.example.royalcarromclassic.ui.components.*
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsSheet(
-    isOpen: Boolean,
     soundEnabled: Boolean,
     hapticEnabled: Boolean,
     stats: PlayerStats,
     onToggleSound: () -> Unit,
     onToggleHaptics: () -> Unit,
+    onOpenRules: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    if (!isOpen) return
-
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = Color(0xFF0F172A),
-        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
-    ) {
+    ClassicSheet(title = "Settings", subtitle = "Sound, feel and your career record", onDismiss = onDismiss) {
         Column(
-            modifier = Modifier
+            Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp)
-                .padding(bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+                .classicPanel(accentAlpha = 0.18f)
+                .padding(horizontal = 12.dp, vertical = 6.dp)
         ) {
-            Text("⚙️ Game Settings", color = Color(0xFFFDE68A), fontSize = 20.sp, fontWeight = FontWeight.Black)
-
-            // Audio & Haptics Toggles
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(Color(0xFF090D16))
-                    .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(16.dp))
-                    .padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                // Sound Toggle
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("🔊", fontSize = 18.sp)
-                        Column {
-                            Text("Sound Effects", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                            Text("Acoustic wood clacks and fanfares", color = Color(0xFF94A3B8), fontSize = 10.sp)
-                        }
-                    }
-                    Switch(
-                        checked = soundEnabled,
-                        onCheckedChange = { onToggleSound() },
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = Color(0xFFFBBF24),
-                            checkedTrackColor = Color(0xFFB45309)
-                        )
-                    )
-                }
-
-                HorizontalDivider(color = Color(0xFF1E293B))
-
-                // Haptics Toggle
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("📳", fontSize = 18.sp)
-                        Column {
-                            Text("Vibration Haptics", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                            Text("Tactile strike and pocket rumbles", color = Color(0xFF94A3B8), fontSize = 10.sp)
-                        }
-                    }
-                    Switch(
-                        checked = hapticEnabled,
-                        onCheckedChange = { onToggleHaptics() },
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = Color(0xFFFBBF24),
-                            checkedTrackColor = Color(0xFFB45309)
-                        )
-                    )
-                }
-            }
-
-            // Player Career Stats
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(Color(0xFF090D16))
-                    .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(16.dp))
-                    .padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                Text("📊 Career Record", color = Color(0xFF38BDF8), fontSize = 12.sp, fontWeight = FontWeight.Bold)
-
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Matches Played:", color = Color(0xFF94A3B8), fontSize = 11.sp)
-                    Text("${stats.matchesPlayed}", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                }
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Matches Won:", color = Color(0xFF94A3B8), fontSize = 11.sp)
-                    Text("${stats.matchesWon}", color = Color(0xFF34D399), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                }
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Win Rate:", color = Color(0xFF94A3B8), fontSize = 11.sp)
-                    val winRate = if (stats.matchesPlayed > 0) ((stats.matchesWon.toFloat() / stats.matchesPlayed) * 100).toInt() else 0
-                    Text("$winRate%", color = Color(0xFFFBBF24), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                }
-            }
+            ToggleRow(
+                glyph = if (soundEnabled) Glyph.SoundOn else Glyph.SoundOff,
+                title = "Sound effects",
+                subtitle = "Wooden clacks, cushion thumps and pocket drops",
+                checked = soundEnabled,
+                onToggle = onToggleSound
+            )
+            GoldDivider(alpha = 0.2f)
+            ToggleRow(
+                glyph = Glyph.Vibration,
+                title = "Haptics",
+                subtitle = "Feel every strike, rebound and pocket",
+                checked = hapticEnabled,
+                onToggle = onToggleHaptics
+            )
         }
+
+        OrnamentHeading("Career")
+        val winRate = if (stats.matchesPlayed > 0) stats.matchesWon * 100 / stats.matchesPlayed else 0
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .classicPanel(accentAlpha = 0.18f)
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            StatRow("Level", "${stats.level}", CarromPalette.GoldLight)
+            StatRow("Matches played", "${stats.matchesPlayed}")
+            StatRow("Matches won", "${stats.matchesWon}", CarromPalette.Jade)
+            StatRow("Win rate", "$winRate%", CarromPalette.GoldLight)
+            StatRow("Discs pocketed", "${stats.totalPockets}")
+            StatRow("Queens covered", "${stats.queenCovers}", CarromPalette.CrimsonLight)
+            StatRow("Trick shots solved", "${stats.trickShotsCompleted}")
+        }
+
+        ClassicButton(
+            text = "Rules of play",
+            onClick = onOpenRules,
+            style = ButtonStyle.Outline,
+            leading = Glyph.Rules,
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+}
+
+@Composable
+private fun ToggleRow(glyph: Glyph, title: String, subtitle: String, checked: Boolean, onToggle: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(role = Role.Switch, onClick = onToggle)
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        GlyphIcon(glyph, size = 22.dp, tint = CarromPalette.Gold)
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleSmall, color = CarromPalette.Ivory)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = CarromPalette.Muted)
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = { onToggle() },
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = CarromPalette.GoldLight,
+                checkedTrackColor = CarromPalette.GoldDeep,
+                checkedBorderColor = CarromPalette.Gold,
+                uncheckedThumbColor = CarromPalette.Muted,
+                uncheckedTrackColor = CarromPalette.Night,
+                uncheckedBorderColor = CarromPalette.Seam
+            )
+        )
     }
 }

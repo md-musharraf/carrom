@@ -33,6 +33,9 @@ class MockGameRepository : GameRepository {
     override fun setSelectedBoard(id: String) { selectedBoard = id }
     override fun getTrickShotStars(levelId: Int): Int = trickStars[levelId] ?: 0
     override fun setTrickShotStars(levelId: Int, stars: Int) { trickStars[levelId] = stars }
+    private val daily = mutableMapOf<String, Pair<Long, Int>>()
+    override fun getDailyCount(counter: String, day: Long): Int = daily[counter]?.takeIf { it.first == day }?.second ?: 0
+    override fun setDailyCount(counter: String, day: Long, count: Int) { daily[counter] = day to count }
 }
 
 class MockAudioEngine : AudioEngine {
@@ -89,7 +92,7 @@ class GameLogicAndViewModelTest {
     fun testInitialGameState() {
         val state = viewModel.gameState.value
         assertEquals(GameMode.VS_AI, state.mode)
-        assertEquals("player1", state.currentTurn)
+        assertEquals(PlayerSlot.PLAYER1, state.currentTurn)
         assertEquals(TurnState.PLACING_STRIKER, state.turnState)
         assertFalse(state.isGameOver)
         assertNull(state.winner)

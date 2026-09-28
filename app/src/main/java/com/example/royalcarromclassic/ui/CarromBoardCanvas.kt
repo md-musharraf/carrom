@@ -1,30 +1,74 @@
 package com.example.royalcarromclassic.ui
 
-import androidx.compose.animation.core.*
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitTouchSlopOrCancellation
+import androidx.compose.foundation.gestures.drag
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.*
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.graphics.drawscope.scale
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.unit.dp
 import com.example.royalcarromclassic.data.*
-import com.example.royalcarromclassic.engine.*
-import kotlinx.coroutines.flow.StateFlow
-import kotlin.math.*
+import com.example.royalcarromclassic.engine.BoardEffects
+import com.example.royalcarromclassic.engine.BoardGeometry
+import com.example.royalcarromclassic.engine.CarromPhysicsEngine.TrajectoryData
+import com.example.royalcarromclassic.engine.LuckyShot
+import com.example.royalcarromclassic.theme.CarromPalette
+import com.example.royalcarromclassic.ui.board.BoardArt
+import com.example.royalcarromclassic.ui.board.PieceArt
+import com.example.royalcarromclassic.ui.board.StrikerArt
+import com.example.royalcarromclassic.ui.board.drawAimGuide
+import com.example.royalcarromclassic.ui.board.drawCarromBoard
+import com.example.royalcarromclassic.ui.board.drawCarromMan
+import com.example.royalcarromclassic.ui.board.drawPullBand
+import com.example.royalcarromclassic.ui.board.drawStriker
+import kotlin.math.abs
+import kotlin.math.atan2
+import kotlin.math.hypot
+
+private const val STRIKER_TOUCH_SLOP = 30f
+private const val RAIL_TOUCH_SLOP = 36f
+private const val MIN_PULL = 18f
+private const val MAX_PULL = 150f
+
+private val ZeroState: State<Float> = object : State<Float> {
+    override val value: Float = 0f
+}
+private val haloStroke = Stroke(width = 2f)
 
 /**
- * High-performance, isolated Carrom Board Canvas.
- * Delivers silky-smooth 60-120 FPS rendering, zero-allocation frame draws,
- * animated laser trajectory beams, elastic slingshot mechanics, and tactile 3D piece rendering.
+ * The carrom board, rendered in two layers:
+ *  - a static layer (frame, surface, markings, pockets) cached in an offscreen layer that is
+ *    only re-rasterised when the board theme changes;
+ *  - a dynamic layer (discs, striker, guide, effects) redrawn when [frameTick] advances.
+ *
+ * Touch model: drag the striker sideways (or anywhere on the rail) to place it, pull it
+ * backwards like a slingshot and release to shoot, or touch the board elsewhere to aim at a point.
  */
 @Composable
 fun CarromBoardCanvas(
@@ -33,642 +77,281 @@ fun CarromBoardCanvas(
     boardTheme: BoardTheme,
     strikerConfig: StrikerConfig,
     gameState: GameState,
-    particles: ParticleSystem,
-    physicsTickFlow: StateFlow<Long>,
+    aimPreview: TrajectoryData?,
+    effects: BoardEffects,
+    frameTick: State<Long>,
     onPositionChanged: (Float) -> Unit,
-    onAimChanged: (Float, Float) -> Unit,
+    onAimChanged: (angle: Float, power: Float) -> Unit,
     onShoot: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // Collect physics tick exclusively in this isolated canvas scope
-    val physicsTick by physicsTickFlow.collectAsState()
+    val boardArt = remember(boardTheme) { BoardArt(boardTheme) }
+    val whiteArt = remember { PieceArt.forType(PieceType.WHITE) }
+    val blackArt = remember { PieceArt.forType(PieceType.BLACK) }
+    val queenArt = remember { PieceArt.forType(PieceType.QUEEN) }
+    val strikerArt = remember(strikerConfig) { StrikerArt(strikerConfig) }
+    fun artFor(type: PieceType) = when (type) {
+        PieceType.WHITE -> whiteArt
+        PieceType.BLACK -> blackArt
+        else -> queenArt
+    }
 
-    var pullTouchPos by remember { mutableStateOf<Offset?>(null) }
-    var isPullingStriker by remember { mutableStateOf(false) }
+    val canAim = gameState.canAim
+    val showGuide = aimPreview != null && !gameState.isGameOver
 
-    // Animated dash phase for flowing laser trajectory beam
-    val infiniteTransition = rememberInfiniteTransition(label = "CanvasLaserAnim")
-    val dashPhase by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 24f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(600, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "LaserDashPhase"
-    )
-
-    val pulseGlow by infiniteTransition.animateFloat(
-        initialValue = 0.4f,
-        targetValue = 0.85f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(900, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "StrikerGlowPulse"
-    )
-
-    // Pre-cached brushes and path effects
-    val woodFrameBrush = remember(boardTheme.woodColor, boardTheme.woodInner) {
-        Brush.linearGradient(
-            colors = listOf(boardTheme.woodColor, boardTheme.woodInner, boardTheme.woodColor),
-            start = Offset.Zero,
-            end = Offset(BoardGeometry.BOARD_SIZE, BoardGeometry.BOARD_SIZE)
+    // The marching guide and the "ready" halo only animate while the player can act.
+    val phase: State<Float>
+    val pulse: State<Float>
+    if (showGuide && canAim) {
+        val transition = rememberInfiniteTransition(label = "aimGuide")
+        phase = transition.animateFloat(
+            0f, 1f, infiniteRepeatable(tween(900, easing = LinearEasing)), label = "guidePhase"
         )
-    }
-
-    val feltBrush = remember(boardTheme.feltColor) {
-        Brush.radialGradient(
-            colors = listOf(boardTheme.feltColor, boardTheme.feltColor.copy(alpha = 0.90f)),
-            center = Offset(BoardGeometry.BOARD_SIZE / 2f, BoardGeometry.BOARD_SIZE / 2f),
-            radius = BoardGeometry.BOARD_SIZE * 0.72f
+        pulse = transition.animateFloat(
+            0f, 1f, infiniteRepeatable(tween(1500, easing = FastOutSlowInEasing), RepeatMode.Restart), label = "guidePulse"
         )
+    } else {
+        phase = ZeroState
+        pulse = ZeroState
     }
 
-    val feltLacquerGloss = remember {
-        Brush.linearGradient(
-            colors = listOf(Color.White.copy(alpha = 0.08f), Color.Transparent),
-            start = Offset(BoardGeometry.PLAYABLE_MIN, BoardGeometry.PLAYABLE_MIN),
-            end = Offset(BoardGeometry.BOARD_SIZE * 0.55f, BoardGeometry.BOARD_SIZE * 0.55f)
-        )
-    }
+    var pullPoint by remember { mutableStateOf<Offset?>(null) }
 
-    val dashedAimPathEffect = remember(dashPhase) {
-        PathEffect.dashPathEffect(floatArrayOf(14f, 10f), -dashPhase)
-    }
-    val dashedTargetEffect = remember(dashPhase) {
-        PathEffect.dashPathEffect(floatArrayOf(10f, 8f), -dashPhase)
-    }
-    val pullStringEffect = remember {
-        PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f)
-    }
+    val currentStriker by rememberUpdatedState(striker)
+    val currentState by rememberUpdatedState(gameState)
+    val currentOnPosition by rememberUpdatedState(onPositionChanged)
+    val currentOnAim by rememberUpdatedState(onAimChanged)
+    val currentOnShoot by rememberUpdatedState(onShoot)
 
-    val s = striker
-    val isAimingOrPlacing = s != null && !s.isPocketed && gameState.currentTurn != "ai" &&
-            (gameState.turnState == TurnState.AIMING || gameState.turnState == TurnState.PLACING_STRIKER)
-
-    val trajectoryData = remember(
-        isAimingOrPlacing,
-        s?.x,
-        s?.y,
-        gameState.strikerAimAngle,
-        gameState.strikerPower,
-        pieces
-    ) {
-        if (isAimingOrPlacing) {
-            CarromPhysicsEngine.calculateTrajectory(
-                striker = s,
-                aimAngle = gameState.strikerAimAngle,
-                power = gameState.strikerPower,
-                pieces = pieces,
-                maxBounces = 3
-            )
-        } else {
-            null
-        }
-    }
-
-    val frameCornerRadius = remember { CornerRadius(36f, 36f) }
-    val boardSize2D = remember { Size(BoardGeometry.BOARD_SIZE, BoardGeometry.BOARD_SIZE) }
-    val feltSize = remember { BoardGeometry.PLAYABLE_MAX - BoardGeometry.PLAYABLE_MIN }
-    val feltRectSize = remember { Size(feltSize, feltSize) }
-    val feltTopLeft = remember { Offset(BoardGeometry.PLAYABLE_MIN, BoardGeometry.PLAYABLE_MIN) }
-    val innerCushionStroke = remember { Stroke(width = 5.5f) }
-
-    Canvas(
-        modifier = modifier
-            .fillMaxWidth()
+    Box(
+        modifier
             .aspectRatio(1f)
-            .pointerInput(gameState.currentTurn, gameState.turnState) {
-                if (gameState.currentTurn == "ai" || gameState.turnState == TurnState.MOVING || gameState.isGameOver) {
-                    return@pointerInput
-                }
+            .shadow(18.dp, RoundedCornerShape(percent = 4), clip = false)
+            .semantics { contentDescription = "Carrom board" }
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown()
+                    val state = currentState
+                    val s = currentStriker
+                    if (!state.canAim || s == null || s.isPocketed) return@awaitEachGesture
 
-                detectTapGestures { offset ->
                     val scale = size.width / BoardGeometry.BOARD_SIZE
-                    val boardX = offset.x / scale
-                    val boardY = offset.y / scale
+                    fun toBoard(p: Offset) = Offset(p.x / scale, p.y / scale)
+                    val start = toBoard(down.position)
+                    val baselineY = if (state.isBottomTurn) BoardGeometry.BASELINE_BOTTOM_Y else BoardGeometry.BASELINE_TOP_Y
+                    val onStriker = hypot(start.x - s.x, start.y - s.y) < s.radius + STRIKER_TOUCH_SLOP
+                    val onRail = abs(start.y - baselineY) < RAIL_TOUCH_SLOP &&
+                        start.x in (BoardGeometry.BASELINE_START_X - RAIL_TOUCH_SLOP)..(BoardGeometry.BASELINE_END_X + RAIL_TOUCH_SLOP)
 
-                    val isBottom = gameState.currentTurn == "player1" || gameState.mode == GameMode.TRICK_SHOTS
-                    val baselineY = if (isBottom) BoardGeometry.BASELINE_BOTTOM_Y else BoardGeometry.BASELINE_TOP_Y
-
-                    if (abs(boardY - baselineY) < 55f) {
-                        val fraction = (boardX - BoardGeometry.BASELINE_START_X) / BoardGeometry.BASELINE_WIDTH
-                        onPositionChanged(fraction.coerceIn(0.06f, 0.94f))
-                    } else if (striker != null) {
-                        val dx = boardX - striker.x
-                        val dy = boardY - striker.y
-                        val angle = atan2(dy, dx)
-                        onAimChanged(angle, gameState.strikerPower)
+                    fun slideTo(p: Offset) = currentOnPosition(BoardGeometry.baselineFractionAt(p.x))
+                    fun aimAt(p: Offset) {
+                        if (hypot(p.x - s.x, p.y - s.y) > s.radius) {
+                            currentOnAim(atan2(p.y - s.y, p.x - s.x), currentState.strikerPower)
+                        }
                     }
-                }
-            }
-            .pointerInput(gameState.currentTurn, gameState.turnState) {
-                if (gameState.currentTurn == "ai" || gameState.turnState == TurnState.MOVING || gameState.isGameOver) {
-                    return@pointerInput
-                }
+                    fun pullTo(p: Offset) {
+                        pullPoint = p
+                        val dx = p.x - s.x
+                        val dy = p.y - s.y
+                        val dist = hypot(dx, dy)
+                        if (dist >= MIN_PULL) {
+                            val fraction = ((dist - MIN_PULL) / (MAX_PULL - MIN_PULL)).coerceIn(0f, 1f)
+                            val power = BoardGeometry.MIN_POWER + fraction * (BoardGeometry.MAX_POWER - BoardGeometry.MIN_POWER)
+                            currentOnAim(atan2(-dy, -dx), power)
+                        }
+                    }
 
-                var dragMode = 0 // 0: None, 1: Baseline Slider, 2: Pull-to-Shoot Aim
+                    when {
+                        onStriker -> {
+                            var slingshot = false
+                            val first = awaitTouchSlopOrCancellation(down.id) { change, over ->
+                                change.consume()
+                                val backward = if (state.isBottomTurn) over.y else -over.y
+                                slingshot = backward > abs(over.x) * 0.5f
+                            } ?: return@awaitEachGesture
 
-                detectDragGestures(
-                    onDragStart = { offset ->
-                        val scale = size.width / BoardGeometry.BOARD_SIZE
-                        val boardX = offset.x / scale
-                        val boardY = offset.y / scale
-
-                        val isBottom = gameState.currentTurn == "player1" || gameState.mode == GameMode.TRICK_SHOTS
-                        val baselineY = if (isBottom) BoardGeometry.BASELINE_BOTTOM_Y else BoardGeometry.BASELINE_TOP_Y
-
-                        if (striker != null) {
-                            val distToStriker = hypot(boardX - striker.x, boardY - striker.y)
-
-                            if (distToStriker < BoardGeometry.STRIKER_RADIUS + 45f) {
-                                // Direct Touch on Striker -> Pull-to-Shoot mode
-                                dragMode = 2
-                                isPullingStriker = true
-                                pullTouchPos = Offset(boardX, boardY)
-                            } else if (abs(boardY - baselineY) < 42f && boardX >= BoardGeometry.BASELINE_START_X - 35f && boardX <= BoardGeometry.BASELINE_END_X + 35f) {
-                                // Baseline Rail positioning
-                                dragMode = 1
-                                val fraction = (boardX - BoardGeometry.BASELINE_START_X) / BoardGeometry.BASELINE_WIDTH
-                                onPositionChanged(fraction.coerceIn(0.06f, 0.94f))
+                            if (slingshot) {
+                                pullTo(toBoard(first.position))
+                                val completed = drag(first.id) { change ->
+                                    change.consume()
+                                    pullTo(toBoard(change.position))
+                                }
+                                val released = pullPoint
+                                pullPoint = null
+                                if (completed && released != null && hypot(released.x - s.x, released.y - s.y) >= MIN_PULL) {
+                                    currentOnShoot()
+                                }
                             } else {
-                                // Touch anywhere on felt -> Smooth Laser Aim Mode
-                                dragMode = 2
-                                isPullingStriker = true
-                                pullTouchPos = Offset(boardX, boardY)
-                                val pullDx = boardX - striker.x
-                                val pullDy = boardY - striker.y
-                                val forwardAngle = atan2(-pullDy, -pullDx)
-                                val pullDist = hypot(pullDx, pullDy)
-                                val power = ((pullDist / 130f) * 100f).coerceIn(20f, 100f)
-                                onAimChanged(forwardAngle, power)
+                                slideTo(toBoard(first.position))
+                                drag(first.id) { change ->
+                                    change.consume()
+                                    slideTo(toBoard(change.position))
+                                }
                             }
                         }
-                    },
-                    onDrag = { change, _ ->
-                        change.consume()
-                        val scale = size.width / BoardGeometry.BOARD_SIZE
-                        val boardX = change.position.x / scale
-                        val boardY = change.position.y / scale
 
-                        if (dragMode == 1) {
-                            val fraction = (boardX - BoardGeometry.BASELINE_START_X) / BoardGeometry.BASELINE_WIDTH
-                            onPositionChanged(fraction.coerceIn(0.06f, 0.94f))
-                        } else if (dragMode == 2 && striker != null) {
-                            pullTouchPos = Offset(boardX, boardY)
-                            val pullDx = boardX - striker.x
-                            val pullDy = boardY - striker.y
-                            val pullDist = hypot(pullDx, pullDy)
-
-                            val forwardAngle = atan2(-pullDy, -pullDx)
-                            val calcPower = ((pullDist / 130f) * 100f).coerceIn(20f, 100f)
-                            onAimChanged(forwardAngle, calcPower)
-                        }
-                    },
-                    onDragEnd = {
-                        if (dragMode == 2 && striker != null && pullTouchPos != null) {
-                            val pullDist = hypot(pullTouchPos!!.x - striker.x, pullTouchPos!!.y - striker.y)
-                            if (pullDist >= 14f) {
-                                onShoot()
+                        onRail -> {
+                            slideTo(start)
+                            drag(down.id) { change ->
+                                change.consume()
+                                slideTo(toBoard(change.position))
                             }
                         }
-                        pullTouchPos = null
-                        isPullingStriker = false
-                        dragMode = 0
-                    },
-                    onDragCancel = {
-                        pullTouchPos = null
-                        isPullingStriker = false
-                        dragMode = 0
+
+                        else -> {
+                            aimAt(start)
+                            drag(down.id) { change ->
+                                change.consume()
+                                aimAt(toBoard(change.position))
+                            }
+                        }
                     }
-                )
+                }
             }
     ) {
-        // Suppress unused warning; physicsTick ensures Canvas invalidation
-        val _tick = physicsTick
-        val scale = size.width / BoardGeometry.BOARD_SIZE
+        // Static layer: rasterised once into an offscreen layer and reused every frame.
+        Canvas(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+        ) {
+            inBoardUnits { drawCarromBoard(boardArt) }
+        }
 
-        withTransform({
-            scale(scale, scale, pivot = Offset.Zero)
-        }) {
-            // 1. Wooden Outer Frame
-            drawRoundRect(
-                brush = woodFrameBrush,
-                topLeft = Offset.Zero,
-                size = boardSize2D,
-                cornerRadius = frameCornerRadius
-            )
+        if (gameState.mode == GameMode.LUCKY_SHOT) PrizeRings(Modifier.fillMaxSize())
 
-            // 2. Playable Felt Surface
-            drawRect(
-                brush = feltBrush,
-                topLeft = feltTopLeft,
-                size = feltRectSize
-            )
+        // Dynamic layer.
+        Canvas(Modifier.fillMaxSize()) {
+            frameTick.value // Invalidate this layer whenever the game loop advances.
+            inBoardUnits {
+                effects.particles.draw(this)
 
-            // Board Lacquer Specular Sheen
-            drawRect(
-                brush = feltLacquerGloss,
-                topLeft = feltTopLeft,
-                size = feltRectSize
-            )
-
-            // Inner Cushion Border
-            drawRect(
-                color = boardTheme.woodInner,
-                topLeft = feltTopLeft,
-                size = feltRectSize,
-                style = innerCushionStroke
-            )
-
-            // 3. Traditional Mandala & Baseline Markings
-            drawMandalaMarkings(this, boardTheme)
-
-            // 4. Corner Pockets
-            drawPockets(this, boardTheme)
-
-            // 5. Particle Effects
-            particles.draw(this)
-
-            // 6. Elastic Slingshot Pull Band & Dynamic Power Rings
-            if (pullTouchPos != null && striker != null && !striker.isPocketed) {
-                val pull = pullTouchPos!!
-                val powerFrac = (gameState.strikerPower / 100f).coerceIn(0f, 1f)
-
-                val tensionColor = when {
-                    powerFrac > 0.75f -> Color(0xFFEF4444)
-                    powerFrac > 0.45f -> Color(0xFFFBBF24)
-                    else -> Color(0xFF22C55E)
+                if (showGuide) {
+                    drawAimGuide(aimPreview, phase.value, pulse.value, subdued = !canAim)
                 }
 
-                // Elastic Pull Line
-                drawLine(
-                    color = tensionColor.copy(alpha = 0.90f),
-                    start = Offset(striker.x, striker.y),
-                    end = pull,
-                    strokeWidth = 4.5f,
-                    pathEffect = pullStringEffect
-                )
+                // Discs dropping into pockets sit beneath the discs still rolling.
+                for (i in pieces.indices) {
+                    val p = pieces[i]
+                    if (p.isPocketed && p.pocketProgress > 0f) drawSinking(p) { x, y, scale, alpha ->
+                        drawCarromMan(artFor(p.type), x, y, scale, alpha, shadowAlpha = alpha)
+                    }
+                }
+                for (i in pieces.indices) {
+                    val p = pieces[i]
+                    if (!p.isPocketed) drawCarromMan(artFor(p.type), p.x, p.y)
+                }
 
-                // Touch Anchor Glow
-                drawCircle(color = tensionColor.copy(alpha = 0.35f), radius = 14f, center = pull)
-                drawCircle(color = tensionColor, radius = 8f, center = pull)
-                drawCircle(color = Color.White, radius = 3.5f, center = pull)
-
-                // Tension Power Gauge Ring around Striker
-                drawCircle(
-                    color = tensionColor.copy(alpha = 0.6f),
-                    radius = striker.radius + 6f + (powerFrac * 12f),
-                    center = Offset(striker.x, striker.y),
-                    style = Stroke(width = 3f)
-                )
-            }
-
-            // 7. Dynamic Trajectory Line
-            if (trajectoryData != null) {
-                drawTrajectory(this, trajectoryData, strikerConfig, dashedAimPathEffect, dashedTargetEffect)
-            }
-
-            // 8. Carrom Pieces (With 3D lacquered shading & dynamic drop shadows)
-            val pieceCount = pieces.size
-            for (i in 0 until pieceCount) {
-                drawCarromPiece(this, pieces[i])
-            }
-
-            // 9. Luxury 3D Striker
-            if (striker != null && !striker.isPocketed) {
-                drawStrikerPiece(
-                    this,
-                    striker,
-                    strikerConfig,
-                    gameState.turnState == TurnState.AIMING || gameState.turnState == TurnState.PLACING_STRIKER,
-                    isPullingStriker,
-                    pulseGlow
-                )
+                if (striker != null) {
+                    drawStrikerLayer(striker, strikerArt, effects, halo = canAim && pullPoint == null, pulse = pulse.value)
+                    val pull = pullPoint
+                    if (pull != null && !striker.isPocketed) {
+                        val fraction = (gameState.strikerPower - BoardGeometry.MIN_POWER) /
+                            (BoardGeometry.MAX_POWER - BoardGeometry.MIN_POWER)
+                        drawPullBand(striker.x, striker.y, striker.radius, pull, fraction)
+                    }
+                }
             }
         }
     }
 }
 
-private fun drawMandalaMarkings(scope: DrawScope, theme: BoardTheme) {
-    val cx = BoardGeometry.BOARD_SIZE / 2f
-    val cy = BoardGeometry.BOARD_SIZE / 2f
-    val patternColor = theme.feltPatternColor
-
-    // Outer Circle
-    scope.drawCircle(
-        color = patternColor,
-        radius = BoardGeometry.CENTER_OUTER_CIRCLE_RADIUS,
-        center = Offset(cx, cy),
-        style = Stroke(width = 2.5f)
+/** Lucky Shot's target: concentric prize rings that shimmer gently, labelled with their coins. */
+@Composable
+private fun PrizeRings(modifier: Modifier = Modifier) {
+    val measurer = rememberTextMeasurer()
+    val shimmer by rememberInfiniteTransition(label = "prizeRings").animateFloat(
+        0.75f, 1f, infiniteRepeatable(tween(1400, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "ringShimmer"
     )
-
-    // Mid Circle
-    scope.drawCircle(
-        color = patternColor,
-        radius = BoardGeometry.CENTER_CIRCLE_RADIUS,
-        center = Offset(cx, cy),
-        style = Stroke(width = 2f)
-    )
-
-    // Center Queen Spot
-    scope.drawCircle(
-        color = theme.centerCircleColor,
-        radius = BoardGeometry.CENTER_SMALL_CIRCLE_RADIUS,
-        center = Offset(cx, cy)
-    )
-    scope.drawCircle(
-        color = theme.accentGold,
-        radius = BoardGeometry.CENTER_SMALL_CIRCLE_RADIUS,
-        center = Offset(cx, cy),
-        style = Stroke(width = 2f)
-    )
-
-    // 8 Decorative Radial Florets
-    for (i in 0 until 8) {
-        val angle = (i * PI.toFloat()) / 4f
-        val cosA = cos(angle)
-        val sinA = sin(angle)
-        val px = cx + cosA * (BoardGeometry.CENTER_CIRCLE_RADIUS + 25f)
-        val py = cy + sinA * (BoardGeometry.CENTER_CIRCLE_RADIUS + 25f)
-
-        scope.drawCircle(
-            color = theme.centerCircleColor,
-            radius = 5.5f,
-            center = Offset(px, py)
-        )
-
-        scope.drawLine(
-            color = patternColor,
-            start = Offset(cx + cosA * BoardGeometry.CENTER_CIRCLE_RADIUS, cy + sinA * BoardGeometry.CENTER_CIRCLE_RADIUS),
-            end = Offset(cx + cosA * (BoardGeometry.CENTER_OUTER_CIRCLE_RADIUS - 10f), cy + sinA * (BoardGeometry.CENTER_OUTER_CIRCLE_RADIUS - 10f)),
-            strokeWidth = 1.5f
-        )
-    }
-
-    // Baselines (Top & Bottom)
-    val drawHorizontalBaseline = { y: Float ->
-        val offset = 7f
-        scope.drawLine(patternColor, Offset(BoardGeometry.BASELINE_START_X, y - offset), Offset(BoardGeometry.BASELINE_END_X, y - offset), strokeWidth = 2f)
-        scope.drawLine(patternColor, Offset(BoardGeometry.BASELINE_START_X, y + offset), Offset(BoardGeometry.BASELINE_END_X, y + offset), strokeWidth = 2f)
-
-        // Left circle
-        scope.drawCircle(theme.centerCircleColor, radius = BoardGeometry.BASELINE_CIRCLE_RADIUS, center = Offset(BoardGeometry.BASELINE_START_X, y))
-        scope.drawCircle(theme.accentGold, radius = BoardGeometry.BASELINE_CIRCLE_RADIUS, center = Offset(BoardGeometry.BASELINE_START_X, y), style = Stroke(width = 1.5f))
-
-        // Right circle
-        scope.drawCircle(theme.centerCircleColor, radius = BoardGeometry.BASELINE_CIRCLE_RADIUS, center = Offset(BoardGeometry.BASELINE_END_X, y))
-        scope.drawCircle(theme.accentGold, radius = BoardGeometry.BASELINE_CIRCLE_RADIUS, center = Offset(BoardGeometry.BASELINE_END_X, y), style = Stroke(width = 1.5f))
-    }
-
-    drawHorizontalBaseline(BoardGeometry.BASELINE_BOTTOM_Y)
-    drawHorizontalBaseline(BoardGeometry.BASELINE_TOP_Y)
-
-    // Corner Arrow Rays pointing to pockets
-    for (i in 0 until 4) {
-        val angle = (i * PI.toFloat()) / 2f + (PI.toFloat() / 4f)
-        val cosA = cos(angle)
-        val sinA = sin(angle)
-        val startX = cx + cosA * (BoardGeometry.CENTER_OUTER_CIRCLE_RADIUS + 25f)
-        val startY = cy + sinA * (BoardGeometry.CENTER_OUTER_CIRCLE_RADIUS + 25f)
-        val endX = cx + cosA * (BoardGeometry.BOARD_SIZE * 0.42f)
-        val endY = cy + sinA * (BoardGeometry.BOARD_SIZE * 0.42f)
-
-        scope.drawLine(patternColor, Offset(startX, startY), Offset(endX, endY), strokeWidth = 2f)
-        scope.drawCircle(patternColor, radius = 5f, center = Offset(endX, endY))
+    val labelStyle = MaterialTheme.typography.labelSmall
+    Canvas(modifier) {
+        val s = size.width / BoardGeometry.BOARD_SIZE
+        val c = Offset(LuckyShot.TARGET.x * s, LuckyShot.TARGET.y * s)
+        val rings = LuckyShot.RINGS
+        for (i in rings.indices.reversed()) {
+            val ring = rings[i]
+            val fill = when (i) {
+                0 -> CarromPalette.GoldLight
+                1 -> CarromPalette.Gold
+                2 -> CarromPalette.Crimson
+                else -> CarromPalette.Parchment
+            }
+            drawCircle(fill, ring.radius * s, c, alpha = (if (i == 0) 0.75f else 0.3f) * shimmer)
+            drawCircle(CarromPalette.GoldDeep, ring.radius * s, c, alpha = 0.9f, style = Stroke(1.5f * s))
+        }
+        // Bullseye label in the middle; the others fan out (top, left, right) so they never collide.
+        rings.forEachIndexed { i, ring ->
+            val inner = if (i == 0) 0f else rings[i - 1].radius
+            val mid = (inner + ring.radius) / 2f * s
+            val label = measurer.measure("${ring.prize}", labelStyle.copy(color = if (i == 0) CarromPalette.Ink else CarromPalette.Ivory))
+            val at = when (i) {
+                0 -> c
+                1 -> Offset(c.x, c.y - mid)
+                2 -> Offset(c.x - mid, c.y)
+                else -> Offset(c.x + mid, c.y)
+            }
+            drawText(label, topLeft = Offset(at.x - label.size.width / 2f, at.y - label.size.height / 2f))
+        }
     }
 }
 
-private fun drawPockets(scope: DrawScope, theme: BoardTheme) {
-    for (pocket in BoardGeometry.POCKETS) {
-        // Metallic Outer Rim
-        scope.drawCircle(
-            color = theme.pocketRimColor,
-            radius = pocket.radius + 5.5f,
-            center = Offset(pocket.x, pocket.y)
-        )
+private inline fun DrawScope.inBoardUnits(block: DrawScope.() -> Unit) {
+    val s = size.width / BoardGeometry.BOARD_SIZE
+    scale(s, s, pivot = Offset.Zero, block = block)
+}
 
-        // Deep Pocket Cup
-        scope.drawCircle(
-            brush = Brush.radialGradient(
-                colors = listOf(Color(0xFF020617), Color(0xFF0F172A), Color(0xFF1E293B)),
-                center = Offset(pocket.x, pocket.y),
-                radius = pocket.radius
-            ),
-            radius = pocket.radius,
-            center = Offset(pocket.x, pocket.y)
-        )
+private fun DrawScope.drawStrikerLayer(striker: Piece, art: StrikerArt, effects: BoardEffects, halo: Boolean, pulse: Float) {
+    if (striker.isPocketed) {
+        if (striker.pocketProgress > 0f) drawSinking(striker) { x, y, scale, alpha -> drawStriker(art, x, y, scale, alpha) }
+        return
+    }
 
-        // Inner Shadow Ring
-        scope.drawCircle(
-            color = Color(0x66000000),
-            radius = pocket.radius,
-            center = Offset(pocket.x, pocket.y),
-            style = Stroke(width = 3f)
+    val trail = effects.trail
+    for (i in trail.size - 1 downTo 1) {
+        val fade = 1f - i.toFloat() / trail.size
+        drawCircle(
+            art.trail,
+            art.radius * (0.55f + 0.4f * fade),
+            Offset(trail.x(i), trail.y(i)),
+            alpha = 0.22f * fade * trail.strength(i)
         )
     }
+
+    if (halo) {
+        drawCircle(
+            CarromPalette.GoldLight,
+            art.radius + 4f + 9f * pulse,
+            Offset(striker.x, striker.y),
+            alpha = 0.55f * (1f - pulse),
+            style = haloStroke
+        )
+    }
+
+    val appear = effects.strikerAppear
+    val scale = 0.55f + 0.45f * easeOutBack(appear)
+    drawStriker(art, striker.x, striker.y, scale = scale, alpha = (appear * 3f).coerceAtMost(1f))
 }
 
-private fun drawCarromPiece(scope: DrawScope, piece: Piece) {
-    if (piece.isPocketed && piece.pocketProgress <= 0.02f) return
-
-    val currentRadius = piece.radius * piece.pocketProgress
-    val currentAlpha = piece.pocketProgress
-
-    if (currentRadius <= 1f) return
-
-    // 1. Dynamic Drop Shadow
-    val speed = hypot(piece.vx, piece.vy)
-    val shadowOffset = 3f + (speed * 0.15f).coerceAtMost(4f)
-    scope.drawCircle(
-        color = Color(0x60000000).copy(alpha = 0.38f * currentAlpha),
-        radius = currentRadius + 1f,
-        center = Offset(piece.x + shadowOffset, piece.y + shadowOffset)
-    )
-
-    // 2. Base Shaded Body (3D Sphere/Disc bevel)
-    scope.drawCircle(
-        brush = Brush.radialGradient(
-            colors = listOf(
-                Color.White.copy(alpha = 0.85f * currentAlpha),
-                piece.primaryColor.copy(alpha = currentAlpha),
-                piece.borderColor.copy(alpha = currentAlpha)
-            ),
-            center = Offset(piece.x - currentRadius * 0.32f, piece.y - currentRadius * 0.32f),
-            radius = currentRadius
-        ),
-        radius = currentRadius,
-        center = Offset(piece.x, piece.y)
-    )
-
-    // 3. Signature Engraved Inlay Ring
-    scope.drawCircle(
-        color = (if (piece.type == PieceType.QUEEN) Color(0xFFFEF08A) else piece.borderColor).copy(alpha = currentAlpha * 0.9f),
-        radius = currentRadius * 0.58f,
-        center = Offset(piece.x, piece.y),
-        style = Stroke(width = 1.6f)
-    )
-
-    // 4. Center Carved Dot
-    scope.drawCircle(
-        color = (if (piece.type == PieceType.QUEEN) Color(0xFFFEF08A) else piece.borderColor).copy(alpha = currentAlpha),
-        radius = currentRadius * 0.22f,
-        center = Offset(piece.x, piece.y)
-    )
-
-    // 5. Specular Gloss Arc
-    scope.drawCircle(
-        color = Color.White.copy(alpha = 0.45f * currentAlpha),
-        radius = currentRadius * 0.28f,
-        center = Offset(piece.x - currentRadius * 0.3f, piece.y - currentRadius * 0.3f)
-    )
-}
-
-private fun drawStrikerPiece(
-    scope: DrawScope,
-    striker: Piece,
-    config: StrikerConfig,
-    isActiveAim: Boolean,
-    isPulling: Boolean,
-    pulseAlpha: Float
+/**
+ * A pocketed disc slides to the pocket centre, shrinks and darkens as it drops into the net.
+ */
+private inline fun DrawScope.drawSinking(
+    piece: Piece,
+    draw: DrawScope.(x: Float, y: Float, scale: Float, alpha: Float) -> Unit
 ) {
-    val r = striker.radius
-
-    // 1. Luminous Pulsing Aura when Aiming
-    if (isActiveAim) {
-        val glowRadius = r + (if (isPulling) 14f else 8f)
-        scope.drawCircle(
-            color = (if (isPulling) Color(0xFFFBBF24) else config.glowColor).copy(alpha = if (isPulling) 0.65f else pulseAlpha * 0.5f),
-            radius = glowRadius,
-            center = Offset(striker.x, striker.y)
-        )
-    }
-
-    // 2. 3D Drop Shadow
-    scope.drawCircle(
-        color = Color(0x75000000),
-        radius = r + 1f,
-        center = Offset(striker.x + 4.5f, striker.y + 4.5f)
-    )
-
-    // 3. Multi-Layered Striker Body Gradient
-    scope.drawCircle(
-        brush = Brush.radialGradient(
-            colors = listOf(Color.White, config.primaryColor, config.secondaryColor),
-            center = Offset(striker.x - r * 0.36f, striker.y - r * 0.36f),
-            radius = r
-        ),
-        radius = r,
-        center = Offset(striker.x, striker.y)
-    )
-
-    // 4. Metallic Outer Rim
-    scope.drawCircle(
-        color = config.glowColor,
-        radius = r,
-        center = Offset(striker.x, striker.y),
-        style = Stroke(width = 2.8f)
-    )
-
-    // 5. Engraved Inner Ring
-    scope.drawCircle(
-        color = Color.White.copy(alpha = 0.75f),
-        radius = r * 0.65f,
-        center = Offset(striker.x, striker.y),
-        style = Stroke(width = 1.6f)
-    )
-
-    // 6. Central Embedded Gemstone
-    scope.drawCircle(
-        brush = Brush.radialGradient(
-            colors = listOf(Color.White, config.glowColor, config.secondaryColor),
-            center = Offset(striker.x - r * 0.08f, striker.y - r * 0.08f),
-            radius = r * 0.28f
-        ),
-        radius = r * 0.28f,
-        center = Offset(striker.x, striker.y)
-    )
+    val pocket = BoardGeometry.POCKETS.getOrNull(piece.pocketId) ?: return
+    val t = 1f - piece.pocketProgress
+    val slide = 1f - (1f - (t * 1.6f).coerceAtMost(1f)).let { it * it * it }
+    val x = piece.x + (pocket.x - piece.x) * slide
+    val y = piece.y + (pocket.y - piece.y) * slide
+    val scale = 1f - 0.4f * t * t
+    draw(x, y, scale, 1f - 0.5f * t * t)
+    drawCircle(Color.Black, piece.radius * scale, Offset(x, y), alpha = 0.75f * t)
 }
 
-private fun drawTrajectory(
-    scope: DrawScope,
-    trajectory: CarromPhysicsEngine.TrajectoryData,
-    config: StrikerConfig,
-    aimDashEffect: PathEffect,
-    targetDashEffect: PathEffect
-) {
-    val path = trajectory.strikerPath
-    if (path.size < 2) return
-
-    // 1. Flowing Laser Striker Aim Beam
-    for (i in 0 until path.size - 1) {
-        // Outer glow
-        scope.drawLine(
-            color = config.trailColor.copy(alpha = 0.3f),
-            start = Offset(path[i].x, path[i].y),
-            end = Offset(path[i + 1].x, path[i + 1].y),
-            strokeWidth = 7f
-        )
-        // Laser core
-        scope.drawLine(
-            color = config.trailColor,
-            start = Offset(path[i].x, path[i].y),
-            end = Offset(path[i + 1].x, path[i + 1].y),
-            strokeWidth = 3.5f,
-            pathEffect = aimDashEffect
-        )
-    }
-
-    // 2. Ghost Striker at Hit Position
-    if (trajectory.targetHitGhostPos != null && trajectory.targetHitPiece != null) {
-        val ghost = trajectory.targetHitGhostPos
-        scope.drawCircle(
-            color = Color(0x44FBBF24),
-            radius = BoardGeometry.STRIKER_RADIUS,
-            center = Offset(ghost.x, ghost.y)
-        )
-        scope.drawCircle(
-            color = Color.White.copy(alpha = 0.9f),
-            radius = BoardGeometry.STRIKER_RADIUS,
-            center = Offset(ghost.x, ghost.y),
-            style = Stroke(width = 1.8f)
-        )
-
-        // 3. Target Hit Piece Predicted Deflection Arrow
-        if (trajectory.targetPath.size >= 2) {
-            val tPath = trajectory.targetPath
-            scope.drawLine(
-                color = Color(0xFF22C55E),
-                start = Offset(tPath[0].x, tPath[0].y),
-                end = Offset(tPath[1].x, tPath[1].y),
-                strokeWidth = 4f,
-                pathEffect = targetDashEffect
-            )
-            scope.drawCircle(
-                color = Color(0x6022C55E),
-                radius = BoardGeometry.PUCK_RADIUS,
-                center = Offset(tPath[1].x, tPath[1].y)
-            )
-            scope.drawCircle(
-                color = Color(0xFF22C55E),
-                radius = BoardGeometry.PUCK_RADIUS,
-                center = Offset(tPath[1].x, tPath[1].y),
-                style = Stroke(width = 1.5f)
-            )
-        }
-
-        // 4. Striker Deflection Vector
-        if (trajectory.strikerDeflectPath.size >= 2) {
-            val sPath = trajectory.strikerDeflectPath
-            scope.drawLine(
-                color = Color(0xFFFBBF24).copy(alpha = 0.7f),
-                start = Offset(sPath[0].x, sPath[0].y),
-                end = Offset(sPath[1].x, sPath[1].y),
-                strokeWidth = 2.5f,
-                pathEffect = aimDashEffect
-            )
-        }
-    }
+private fun easeOutBack(t: Float): Float {
+    val c1 = 1.70158f
+    val c3 = c1 + 1f
+    val u = t - 1f
+    return 1f + c3 * u * u * u + c1 * u * u
 }
-

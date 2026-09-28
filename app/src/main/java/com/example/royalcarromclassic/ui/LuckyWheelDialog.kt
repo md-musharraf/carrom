@@ -25,6 +25,7 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import com.example.royalcarromclassic.engine.DailySpin
 import com.example.royalcarromclassic.theme.CarromPalette
 import com.example.royalcarromclassic.ui.components.*
 import kotlinx.coroutines.launch
@@ -34,7 +35,7 @@ import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.random.Random
 
-private val PRIZES = listOf(100, 250, 500, 1000, 150, 300, 750, 2000)
+private val PRIZES = DailySpin.PRIZES
 
 /**
  * Wheel geometry. Segment i spans [i·sweep, (i+1)·sweep) degrees measured clockwise from
@@ -62,14 +63,20 @@ internal object WheelMath {
 }
 
 @Composable
+/**
+ * The once-a-day wheel. [onSpin] uses today's spin and returns the winning segment (the prize is
+ * already paid), or null when it has been used; the wheel then turns to land on that segment.
+ */
 fun LuckyWheelDialog(
-    onAwardCoins: (Int) -> Unit,
+    spinAvailable: Boolean,
+    onSpin: () -> Int?,
     onDismiss: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
     val rotation = remember { Animatable(0f) }
     var spinning by remember { mutableStateOf(false) }
     var prize by remember { mutableStateOf<Int?>(null) }
+    var available by remember { mutableStateOf(spinAvailable) }
 
     Dialog(onDismissRequest = { if (!spinning) onDismiss() }) {
         Column(
@@ -82,7 +89,7 @@ fun LuckyWheelDialog(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             Text("Daily Lucky Spin", style = MaterialTheme.typography.headlineMedium, color = CarromPalette.GoldLight)
-            Text("Turn the royal wheel for bonus coins", style = MaterialTheme.typography.bodySmall, color = CarromPalette.Muted)
+            Text("One free turn of the royal wheel every day", style = MaterialTheme.typography.bodySmall, color = CarromPalette.Muted)
 
             Wheel(rotation = { rotation.value }, spinning = spinning, modifier = Modifier.size(264.dp))
 
@@ -99,15 +106,17 @@ fun LuckyWheelDialog(
             ClassicButton(
                 text = when {
                     spinning -> "Spinning…"
-                    prize != null -> "Spin again"
+                    !available -> "Next spin tomorrow"
                     else -> "Spin the wheel"
                 },
-                enabled = !spinning,
+                enabled = !spinning && available,
                 onClick = {
+                    val index = onSpin()
+                    available = false
+                    if (index == null) return@ClassicButton
                     spinning = true
                     prize = null
                     scope.launch {
-                        val index = Random.nextInt(PRIZES.size)
                         val target = WheelMath.targetRotation(
                             current = rotation.value,
                             index = index,
@@ -116,9 +125,7 @@ fun LuckyWheelDialog(
                             jitter = Random.nextFloat() - 0.5f
                         )
                         rotation.animateTo(target, tween(4_200, easing = CubicBezierEasing(0.12f, 0.75f, 0.18f, 1f)))
-                        val won = PRIZES[WheelMath.segmentAt(rotation.value, PRIZES.size)]
-                        prize = won
-                        onAwardCoins(won)
+                        prize = PRIZES[WheelMath.segmentAt(rotation.value, PRIZES.size)]
                         spinning = false
                     }
                 },

@@ -92,6 +92,11 @@ callback and receive `{ ok: true, data }` or `{ ok: false, error: { code, messag
 Board coordinates are in board units (800 × 800, y down). Seat 0 shoots from the bottom baseline,
 seat 1 from the top; clients show their own seat at the bottom by rotating the board 180°.
 
+A `MatchSnapshot` carries `deadline` (when the current turn times out) and `serverTime` (when the
+snapshot was taken), both whole Unix milliseconds. Clients time the turn with
+`deadline - serverTime` measured on their own clock, so a phone whose clock is off still shows
+the right countdown.
+
 ## Architecture notes
 
 * **Authoritative shots** — the server simulates the shot to rest (same constants and sub-stepping

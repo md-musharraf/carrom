@@ -67,6 +67,8 @@ export interface MatchSnapshot {
   current: Seat;
   turn: number;
   deadline: number;
+  /** Server clock when the snapshot was taken, so clients can correct for device clock skew. */
+  serverTime: number;
   turnSeconds: number;
   phase: MatchState["phase"];
   winner: Seat | null;
@@ -410,6 +412,7 @@ export class MatchService {
       current: state.current,
       turn: state.turn,
       deadline: state.deadline,
+      serverTime: this.clock.now(),
       turnSeconds: this.turnSeconds,
       phase: state.phase,
       winner: state.winner,
@@ -425,7 +428,8 @@ export class MatchService {
 
   private nextDeadline(animationSeconds = 0): number {
     // Give clients time to watch the shot play out before the next turn's clock starts.
-    return this.clock.now() + (animationSeconds + this.turnSeconds) * 1000;
+    // Whole milliseconds: clients read timestamps as integers.
+    return this.clock.now() + Math.round((animationSeconds + this.turnSeconds) * 1000);
   }
 
   private async loadOrNull(matchId: string): Promise<MatchState | null> {

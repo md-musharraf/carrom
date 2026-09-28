@@ -29,22 +29,66 @@ import com.example.royalcarromclassic.data.PlayerSlot
 import com.example.royalcarromclassic.theme.CarromPalette
 import com.example.royalcarromclassic.ui.components.*
 
-private data class Verdict(val title: String, val subtitle: String, val triumphant: Boolean, val coins: Int, val xp: Int)
+private data class Verdict(
+    val title: String,
+    val subtitle: String,
+    val triumphant: Boolean,
+    val coins: Int,
+    val xp: Int,
+    val primary: String = "Play again",
+    val secondary: String = "Change mode",
+    /** Rating points gained or lost (ranked online matches only). */
+    val ratingChange: Int? = null
+)
 
 private fun verdictFor(state: GameState): Verdict {
     val p1Won = state.winner == PlayerSlot.PLAYER1
     return when (state.mode) {
         GameMode.TRICK_SHOTS ->
             if (p1Won) Verdict("Solved!", "A masterful trick shot", true, 300, 50)
-            else Verdict("Out of Shots", "Study the guide and try again", false, 0, 0)
+            else Verdict("Out of Shots", "Study the guide and try again", false, 0, 0, primary = "Try again")
         GameMode.VS_AI ->
             if (p1Won) Verdict("Victory", "You bested the Bot Master", true, 500, 100)
             else Verdict("Defeat", "The bot takes this one — a rematch?", false, 0, 0)
+        GameMode.BLITZ ->
+            if (p1Won) Verdict("Blitz Champion", "Quick hands and a steady eye", true, 500, 100)
+            else Verdict("Out-paced", "The bot was quicker this time", false, 0, 0)
+        GameMode.LUCKY_SHOT -> Verdict(
+            "Lucky Shot", "You won ${state.luckyShot?.coinsWon ?: 0} coins today. New shots at midnight.", true,
+            coins = state.luckyShot?.coinsWon ?: 0, xp = 0, primary = "Back to the table"
+        )
+        GameMode.ONLINE -> onlineVerdict(state)
         GameMode.PRACTICE -> Verdict("Board Cleared", "Practice makes perfect", true, 500, 100)
         else -> Verdict("${winnerName(state)} Wins", "A fine game of carrom", true, if (p1Won) 500 else 0, if (p1Won) 100 else 0)
     }
 }
 
+private fun onlineVerdict(state: GameState): Verdict {
+    val online = state.online
+    val result = online?.result
+    if (state.winner == null || result == null) {
+        return Verdict("Match Over", "The match ended while you were away", false, 0, 0, primary = "Play online", secondary = "Leave")
+    }
+    val won = state.winner == PlayerSlot.PLAYER1
+    val opponent = state.player2.name
+    val subtitle = when (result.reason) {
+        "resigned" -> if (won) "$opponent resigned" else "You resigned"
+        "timeout" -> if (won) "$opponent ran out of time" else "You ran out of time"
+        else -> if (won) "You outplayed $opponent" else "$opponent takes this one"
+    }
+    return Verdict(
+        title = if (won) "Victory" else "Defeat",
+        subtitle = subtitle,
+        triumphant = won,
+        coins = result.coins,
+        xp = result.xp,
+        primary = "Play again",
+        secondary = "Leave",
+        ratingChange = if (online.ranked) result.ratingChange else null
+    )
+}
+
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun GameOverDialog(
     gameState: GameState,
@@ -53,7 +97,9 @@ fun GameOverDialog(
     onNextTrickShot: (Int) -> Unit,
     onChangeMode: () -> Unit
 ) {
-    val verdict = remember(gameState.mode, gameState.winner, gameState.player1.name, gameState.player2.name) { verdictFor(gameState) }
+    val verdict = remember(gameState.mode, gameState.winner, gameState.player1.name, gameState.player2.name, gameState.online?.result) {
+        verdictFor(gameState)
+    }
 
     var appeared by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { appeared = true }
@@ -108,7 +154,7 @@ fun GameOverDialog(
                     Text(verdict.subtitle, style = MaterialTheme.typography.bodyMedium, color = CarromPalette.Parchment, textAlign = TextAlign.Center)
                 }
 
-                if (gameState.mode != GameMode.TRICK_SHOTS) {
+                if (gameState.mode != GameMode.TRICK_SHOTS && gameState.mode != GameMode.LUCKY_SHOT) {
                     Row(
                         Modifier
                             .fillMaxWidth()
@@ -122,10 +168,16 @@ fun GameOverDialog(
                     }
                 }
 
-                if (verdict.coins > 0) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        RewardChip(Glyph.Coin, "+${verdict.coins}", "coins")
-                        RewardChip(Glyph.Star, "+${verdict.xp}", "xp")
+                if (verdict.coins > 0 || verdict.xp > 0 || verdict.ratingChange != null) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (verdict.coins > 0) RewardChip(Glyph.Coin, "+%,d".format(verdict.coins), "coins")
+                        if (verdict.xp > 0) RewardChip(Glyph.Star, "+${verdict.xp}", "xp")
+                        verdict.ratingChange?.let { change ->
+                            RewardChip(Glyph.Chart, if (change >= 0) "+$change" else "$change", "rating")
+                        }
                     }
                 }
 
@@ -135,13 +187,9 @@ fun GameOverDialog(
                         ClassicButton("Next challenge", onClick = { onNextTrickShot(nextTrickShotLevel) }, modifier = Modifier.fillMaxWidth())
                         ClassicButton("Replay", onClick = onRematch, style = ButtonStyle.Outline, modifier = Modifier.fillMaxWidth())
                     } else {
-                        ClassicButton(
-                            if (gameState.mode == GameMode.TRICK_SHOTS && !verdict.triumphant) "Try again" else "Play again",
-                            onClick = onRematch,
-                            modifier = Modifier.fillMaxWidth()
-                        )
+                        ClassicButton(verdict.primary, onClick = onRematch, modifier = Modifier.fillMaxWidth())
                     }
-                    ClassicButton("Change mode", onClick = onChangeMode, style = ButtonStyle.Outline, modifier = Modifier.fillMaxWidth())
+                    ClassicButton(verdict.secondary, onClick = onChangeMode, style = ButtonStyle.Outline, modifier = Modifier.fillMaxWidth())
                 }
             }
         }

@@ -16,7 +16,16 @@ enum class GameMode {
     FREESTYLE,
     TRICK_SHOTS,
     PASS_AND_PLAY,
-    PRACTICE
+    PRACTICE,
+
+    /** Race the bot to 120 points with a ten-second shot clock. */
+    BLITZ,
+
+    /** Daily mini-game: send the lucky disc into the prize rings. */
+    LUCKY_SHOT,
+
+    /** A server-authoritative match against another player. */
+    ONLINE
 }
 
 enum class AIDifficulty {
@@ -168,6 +177,47 @@ data class BoardSummary(
     val queenOnBoard: Boolean = false
 )
 
+/** A running shot clock: the turn ends at [deadlineMillis] (device clock) after [totalSeconds]. */
+data class TurnClock(val deadlineMillis: Long, val totalSeconds: Float)
+
+/** Today's Lucky Shot session. */
+data class LuckyShotStatus(
+    val attemptsLeft: Int,
+    val coinsWon: Int = 0,
+    /** Prize of the most recent attempt, or null before the first one. */
+    val lastPrize: Int? = null
+)
+
+/** What the local player earned when an online match ended. */
+data class OnlineResult(
+    val reason: String,
+    val coins: Int,
+    val xp: Int,
+    val ratingBefore: Int,
+    val ratingAfter: Int,
+    val leveledUp: Boolean
+) {
+    val ratingChange: Int get() = ratingAfter - ratingBefore
+}
+
+/** A quick-chat emote shown beside a player's seat. [id] distinguishes repeats of the same emote. */
+data class EmoteBubble(val slot: PlayerSlot, val emote: String, val id: Long)
+
+/** Live details of an online match. The local player is always [PlayerSlot.PLAYER1] (bottom). */
+data class OnlineMatchStatus(
+    val matchId: String,
+    val ranked: Boolean,
+    val arena: String?,
+    val myRating: Int,
+    val opponentRating: Int,
+    val opponentPlayerId: String,
+    val opponentConnected: Boolean = true,
+    /** True while waiting for the server to confirm the shot just played. */
+    val syncing: Boolean = false,
+    val emote: EmoteBubble? = null,
+    val result: OnlineResult? = null
+)
+
 data class GameState(
     val mode: GameMode = GameMode.VS_AI,
     val aiDifficulty: AIDifficulty = AIDifficulty.MEDIUM,
@@ -187,6 +237,15 @@ data class GameState(
     /** Non-null while playing a trick shot challenge. */
     val trickShot: TrickShotStatus? = null,
 
+    /** Non-null while playing Lucky Shot. */
+    val luckyShot: LuckyShotStatus? = null,
+
+    /** Non-null during an online match. */
+    val online: OnlineMatchStatus? = null,
+
+    /** The current turn's shot clock (Blitz and online play), or null when untimed. */
+    val turnClock: TurnClock? = null,
+
     val strikerBaselineOffset: Float = 0.5f,
     val strikerAimAngle: Float = -kotlin.math.PI.toFloat() / 2f, // pointing up
     val strikerPower: Float = 50f,
@@ -201,14 +260,19 @@ data class GameState(
     val toastMessage: String? = null
 ) {
     /** True while the bot controls the current shot. */
-    val isAiTurn: Boolean get() = mode == GameMode.VS_AI && currentTurn == PlayerSlot.PLAYER2
+    val isAiTurn: Boolean
+        get() = (mode == GameMode.VS_AI || mode == GameMode.BLITZ) && currentTurn == PlayerSlot.PLAYER2
+
+    /** True while the online opponent is shooting; their aim arrives over the network. */
+    val isRemoteTurn: Boolean get() = mode == GameMode.ONLINE && currentTurn == PlayerSlot.PLAYER2
 
     /** Player 1 shoots from the bottom baseline, player 2 (or the bot) from the top. */
     val isBottomTurn: Boolean get() = currentTurn == PlayerSlot.PLAYER1
 
     /** True when a human may place, aim or fire the striker. */
     val canAim: Boolean
-        get() = !isGameOver && !isAiTurn && turnState != TurnState.MOVING
+        get() = !isGameOver && !isAiTurn && !isRemoteTurn && turnState != TurnState.MOVING &&
+            online?.syncing != true
 
     fun player(slot: PlayerSlot): PlayerData = if (slot == PlayerSlot.PLAYER1) player1 else player2
 }

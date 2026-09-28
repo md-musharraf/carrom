@@ -12,6 +12,28 @@
 -keep class com.example.royalcarromclassic.data.PlayerStats { *; }
 -keep class com.example.royalcarromclassic.data.GameState { *; }
 
+# kotlinx.serialization: keep generated serializers for the online DTOs
+-keepattributes *Annotation*, InnerClasses
+-keep,includedescriptorclasses class com.example.royalcarromclassic.online.**$$serializer { *; }
+-keepclassmembers class com.example.royalcarromclassic.online.** {
+    *** Companion;
+}
+-keepclasseswithmembers class com.example.royalcarromclassic.online.** {
+    kotlinx.serialization.KSerializer serializer(...);
+}
+
+# Socket.IO / OkHttp
+-dontwarn okhttp3.**
+-dontwarn okio.**
+-dontwarn org.conscrypt.**
+-keep class io.socket.** { *; }
+
+# Credential Manager loads its Play Services provider reflectively.
+-if class androidx.credentials.CredentialManager
+-keep class androidx.credentials.playservices.** {
+  *;
+}
+
 # Optimize aggressively
 -optimizationpasses 5
 -allowaccessmodification

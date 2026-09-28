@@ -39,6 +39,12 @@ private val CONTROLS = listOf(
     Rule(RuleIcon.Symbol(Glyph.Bolt, CarromPalette.Gold), "Shoot", "Pull the striker back like a slingshot and release — the further you pull, the harder the shot. Or set power below and press Strike."),
 )
 
+private val MODES = listOf(
+    Rule(RuleIcon.Symbol(Glyph.Globe, CarromPalette.Jade), "Online", "Each turn has a shot clock, shown as a ring around the player's crest; three timeouts in a row forfeit the match. Ranked arenas escrow the entry fee and the winner takes the pot."),
+    Rule(RuleIcon.Symbol(Glyph.Bolt, CarromPalette.Amber), "Blitz", "Race the bot to ${CarromRules.BLITZ_TARGET} points. You have ten seconds a shot — let the clock run out and the turn passes."),
+    Rule(RuleIcon.Symbol(Glyph.Target, CarromPalette.GoldLight), "Lucky Shot", "Three free shots a day: knock the lucky disc into the rings. The closer it stops to the centre, the bigger the prize."),
+)
+
 @Composable
 fun RulesSheet(onDismiss: () -> Unit) {
     ClassicSheet(title = "Rules of Play", subtitle = "The essentials of classic carrom", onDismiss = onDismiss) {
@@ -52,6 +58,7 @@ fun RulesSheet(onDismiss: () -> Unit) {
             RuleSection("Scoring", SCORING)
             RuleSection("Fouls", FOULS)
             RuleSection("Controls", CONTROLS)
+            RuleSection("Online & special modes", MODES)
         }
     }
 }

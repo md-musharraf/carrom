@@ -76,12 +76,16 @@ describe("quick match", () => {
     const seenByShooter = nextEvent<ShotEvent>(shooter.socket, "match:shot");
     const seenByWatcher = nextEvent<ShotEvent>(watcher.socket, "match:shot");
 
-    await call(shooter.socket, "match:shoot", { matchId: snapshot.id, turn: 0, offset: 0.5, angle: -Math.PI / 2, power: 100 });
+    // A break lasting 3.8333… s: the next deadline would be a fractional millisecond unless rounded.
+    await call(shooter.socket, "match:shoot", { matchId: snapshot.id, turn: 0, offset: 0.5, angle: -Math.PI / 2 + 0.01, power: 100 });
     const [a, b] = await Promise.all([seenByShooter, seenByWatcher]);
     expect(a).toEqual(b);
     expect(a).toMatchObject({ turn: 0, seat: 0 });
     expect(a.snapshot.turn).toBe(1);
     expect(a.result.seconds).toBeGreaterThan(0.5);
+    // Timestamps are whole milliseconds (clients parse them as integers), even after a fractional-second shot.
+    expect(Number.isInteger(a.snapshot.deadline)).toBe(true);
+    expect(Number.isInteger(a.snapshot.serverTime)).toBe(true);
     // The break scattered the cluster.
     const moved = a.snapshot.pieces.filter((p) => {
       const before = snapshot.pieces.find((q) => q.id === p.id)!;

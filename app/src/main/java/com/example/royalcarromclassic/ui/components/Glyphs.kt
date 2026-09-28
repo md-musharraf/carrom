@@ -27,7 +27,8 @@ import kotlin.math.sin
 enum class Glyph {
     Modes, Target, Gift, Shop, Rules, Settings, Coin, Crown, Star, StarOutline, Lock,
     ChevronLeft, ChevronRight, ChevronDown, RotateCcw, RotateCw, Minus, Plus,
-    SoundOn, SoundOff, Vibration, Trophy, Bolt, Chart, Check, Players
+    SoundOn, SoundOff, Vibration, Trophy, Bolt, Chart, Check, Players,
+    Globe, Flag, Chat, Copy, Share, Phone, Close, User, Edit
 }
 
 @Composable
@@ -241,6 +242,89 @@ fun DrawScope.drawGlyph(glyph: Glyph, tint: Color) {
             drawArc(tint, 180f, 180f, true, p(0.12f, 0.5f), Size(s * 0.44f, s * 0.44f))
             drawCircle(tint, s * 0.12f, p(0.68f, 0.32f), style = thin)
             drawArc(tint, 180f, 180f, false, p(0.46f, 0.5f), Size(s * 0.44f, s * 0.44f), style = thin)
+        }
+
+        Glyph.Globe -> {
+            val c = p(0.5f, 0.5f)
+            drawCircle(tint, s * 0.38f, c, style = thin)
+            drawOval(tint, p(0.34f, 0.12f), Size(s * 0.32f, s * 0.76f), style = thin)
+            drawLine(tint, p(0.12f, 0.5f), p(0.88f, 0.5f), s * 0.065f, cap = StrokeCap.Round)
+            drawArc(tint, 200f, 140f, false, p(0.16f, 0.26f), Size(s * 0.68f, s * 0.4f), style = thin)
+            drawArc(tint, 20f, 140f, false, p(0.16f, 0.34f), Size(s * 0.68f, s * 0.4f), style = thin)
+        }
+
+        Glyph.Flag -> {
+            drawLine(tint, p(0.26f, 0.12f), p(0.26f, 0.9f), s * 0.08f, cap = StrokeCap.Round)
+            val cloth = Path().apply {
+                moveTo(ox + 0.3f * s, oy + 0.16f * s)
+                cubicTo(ox + 0.45f * s, oy + 0.08f * s, ox + 0.6f * s, oy + 0.26f * s, ox + 0.8f * s, oy + 0.16f * s)
+                lineTo(ox + 0.8f * s, oy + 0.52f * s)
+                cubicTo(ox + 0.6f * s, oy + 0.62f * s, ox + 0.45f * s, oy + 0.44f * s, ox + 0.3f * s, oy + 0.52f * s)
+                close()
+            }
+            drawPath(cloth, tint)
+        }
+
+        Glyph.Chat -> {
+            drawRoundRect(tint, p(0.12f, 0.16f), Size(s * 0.76f, s * 0.54f), CornerRadius(s * 0.14f), style = thin)
+            val tail = Path().apply {
+                moveTo(ox + 0.3f * s, oy + 0.68f * s)
+                lineTo(ox + 0.26f * s, oy + 0.88f * s)
+                lineTo(ox + 0.48f * s, oy + 0.7f * s)
+            }
+            drawPath(tail, tint, style = thin)
+            for (i in 0..2) drawCircle(tint, s * 0.05f, p(0.34f + i * 0.16f, 0.43f))
+        }
+
+        Glyph.Copy -> {
+            drawRoundRect(tint, p(0.32f, 0.3f), Size(s * 0.5f, s * 0.56f), CornerRadius(s * 0.07f), style = thin)
+            val back = Path().apply {
+                moveTo(ox + 0.2f * s, oy + 0.66f * s)
+                lineTo(ox + 0.2f * s, oy + 0.22f * s)
+                cubicTo(ox + 0.2f * s, oy + 0.17f * s, ox + 0.23f * s, oy + 0.14f * s, ox + 0.28f * s, oy + 0.14f * s)
+                lineTo(ox + 0.62f * s, oy + 0.14f * s)
+            }
+            drawPath(back, tint, style = thin)
+        }
+
+        Glyph.Share -> {
+            val a = p(0.72f, 0.22f)
+            val b = p(0.28f, 0.5f)
+            val c = p(0.72f, 0.78f)
+            drawLine(tint, a, b, s * 0.065f)
+            drawLine(tint, b, c, s * 0.065f)
+            drawCircle(tint, s * 0.12f, a)
+            drawCircle(tint, s * 0.12f, b)
+            drawCircle(tint, s * 0.12f, c)
+        }
+
+        Glyph.Phone -> {
+            drawRoundRect(tint, p(0.3f, 0.1f), Size(s * 0.4f, s * 0.8f), CornerRadius(s * 0.08f), style = thin)
+            drawLine(tint, p(0.44f, 0.2f), p(0.56f, 0.2f), s * 0.05f, cap = StrokeCap.Round)
+            drawCircle(tint, s * 0.045f, p(0.5f, 0.78f))
+        }
+
+        Glyph.Close -> {
+            drawLine(tint, p(0.26f, 0.26f), p(0.74f, 0.74f), s * 0.09f, cap = StrokeCap.Round)
+            drawLine(tint, p(0.74f, 0.26f), p(0.26f, 0.74f), s * 0.09f, cap = StrokeCap.Round)
+        }
+
+        Glyph.Edit -> {
+            val pencil = Path().apply {
+                moveTo(ox + 0.66f * s, oy + 0.14f * s)
+                lineTo(ox + 0.86f * s, oy + 0.34f * s)
+                lineTo(ox + 0.38f * s, oy + 0.82f * s)
+                lineTo(ox + 0.14f * s, oy + 0.86f * s)
+                lineTo(ox + 0.18f * s, oy + 0.62f * s)
+                close()
+            }
+            drawPath(pencil, tint, style = thin)
+            drawLine(tint, p(0.56f, 0.24f), p(0.76f, 0.44f), s * 0.065f)
+        }
+
+        Glyph.User -> {
+            drawCircle(tint, s * 0.17f, p(0.5f, 0.32f))
+            drawArc(tint, 180f, 180f, true, p(0.18f, 0.56f), Size(s * 0.64f, s * 0.56f))
         }
 
         Glyph.Check -> {

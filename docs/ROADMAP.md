@@ -35,7 +35,7 @@ Engineering references: [Google ID token verification](https://developers.google
 
 ## Phased roadmap
 
-### Phase 1 — Online foundation (this iteration)
+### Phase 1 — Online foundation (shipped)
 - **Accounts**: guest play, Google, Facebook and phone-number (OTP) sign-in; link any of them to
   a guest account; every player gets a short, shareable **Player ID** (e.g. `7K3P-9QXA`).
 - **Sessions**: short-lived JWT access tokens, rotating refresh tokens with reuse detection,
@@ -50,8 +50,15 @@ Engineering references: [Google ID token verification](https://developers.google
   **server-authoritative physics** (the server simulates every shot), live opponent aim,
   turn timers, quick-chat emotes, reconnection with state recovery, forfeits.
 - **Ranking**: Glicko-2 ratings for ranked matches.
-- **Client**: sign-in sheet, profile, friends, leaderboards, online lobby and online match flow;
-  new offline modes **Lucky Shot** (daily target mini-game) and **Blitz** (timed turns vs bot).
+- **Client**: account sheet (Google via Credential Manager, Facebook Login, phone OTP, guest,
+  linking, Player ID copy, match history, delete account), Play Online sheet (arenas, daily
+  reward, matchmaking, private rooms with share/invite), Community sheet (friends with presence,
+  four leaderboards), invite banner, and the online match itself: board rotated so each player
+  sits at the bottom, live opponent aim, turn-clock ring, quick-chat emotes, resign, reconnect
+  and resume.
+- **New offline modes**: **Blitz** (race the bot to 120 with a 10-second shot clock) and
+  **Lucky Shot** (three free daily flicks into prize rings worth up to 500 coins). The daily
+  wheel is now once per day with the same odds as the server's.
 
 ### Phase 2 — Retention
 - Victory chests and a chest queue; missions and achievements.
@@ -93,8 +100,19 @@ authoritative end state. Both clients animate the shot locally from the input �
 smooth and needs no position streaming — then settle onto the server's end state. A modified
 client cannot move discs, fake pots or skip turns.
 
+### Client flow for an online shot
+1. The shooter's device animates the shot at once and sends `match:shoot` with its input
+   (converted to server coordinates: seat 1 sees the board rotated half a turn).
+2. The server simulates, scores and broadcasts `match:shot` with the authoritative snapshot.
+3. The opponent's device replays the shot from the input; both devices then reconcile with the
+   snapshot (discs glide the last fraction of a unit; a disc the server pocketed drops, one it
+   kept reappears). Updates are queued and applied strictly in order, so a turn timeout or the
+   end of the match can never overtake a shot that is still rolling.
+4. A refused shot (stale turn, lost connection) triggers a `match:resume` resync.
+
 ### Horizontal scaling
-All match state lives in Redis with optimistic versioning, so any node can process any event.
+All match state lives in Redis and every mutation runs under a per-match lock, so any node can
+process any event.
 Turn deadlines sit in a Redis sorted set that every node sweeps and claims atomically. The
 Socket.IO Redis Streams adapter fans events out across nodes and supports connection-state
 recovery for brief disconnects.

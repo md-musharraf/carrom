@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
@@ -29,11 +30,14 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import com.example.royalcarromclassic.data.*
 import com.example.royalcarromclassic.engine.BoardEffects
 import com.example.royalcarromclassic.engine.BoardGeometry
 import com.example.royalcarromclassic.engine.CarromPhysicsEngine.TrajectoryData
+import com.example.royalcarromclassic.engine.LuckyShot
 import com.example.royalcarromclassic.theme.CarromPalette
 import com.example.royalcarromclassic.ui.board.BoardArt
 import com.example.royalcarromclassic.ui.board.PieceArt
@@ -214,6 +218,8 @@ fun CarromBoardCanvas(
             inBoardUnits { drawCarromBoard(boardArt) }
         }
 
+        if (gameState.mode == GameMode.LUCKY_SHOT) PrizeRings(Modifier.fillMaxSize())
+
         // Dynamic layer.
         Canvas(Modifier.fillMaxSize()) {
             frameTick.value // Invalidate this layer whenever the game loop advances.
@@ -246,6 +252,45 @@ fun CarromBoardCanvas(
                     }
                 }
             }
+        }
+    }
+}
+
+/** Lucky Shot's target: concentric prize rings that shimmer gently, labelled with their coins. */
+@Composable
+private fun PrizeRings(modifier: Modifier = Modifier) {
+    val measurer = rememberTextMeasurer()
+    val shimmer by rememberInfiniteTransition(label = "prizeRings").animateFloat(
+        0.75f, 1f, infiniteRepeatable(tween(1400, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "ringShimmer"
+    )
+    val labelStyle = MaterialTheme.typography.labelSmall
+    Canvas(modifier) {
+        val s = size.width / BoardGeometry.BOARD_SIZE
+        val c = Offset(LuckyShot.TARGET.x * s, LuckyShot.TARGET.y * s)
+        val rings = LuckyShot.RINGS
+        for (i in rings.indices.reversed()) {
+            val ring = rings[i]
+            val fill = when (i) {
+                0 -> CarromPalette.GoldLight
+                1 -> CarromPalette.Gold
+                2 -> CarromPalette.Crimson
+                else -> CarromPalette.Parchment
+            }
+            drawCircle(fill, ring.radius * s, c, alpha = (if (i == 0) 0.75f else 0.3f) * shimmer)
+            drawCircle(CarromPalette.GoldDeep, ring.radius * s, c, alpha = 0.9f, style = Stroke(1.5f * s))
+        }
+        // Bullseye label in the middle; the others fan out (top, left, right) so they never collide.
+        rings.forEachIndexed { i, ring ->
+            val inner = if (i == 0) 0f else rings[i - 1].radius
+            val mid = (inner + ring.radius) / 2f * s
+            val label = measurer.measure("${ring.prize}", labelStyle.copy(color = if (i == 0) CarromPalette.Ink else CarromPalette.Ivory))
+            val at = when (i) {
+                0 -> c
+                1 -> Offset(c.x, c.y - mid)
+                2 -> Offset(c.x - mid, c.y)
+                else -> Offset(c.x + mid, c.y)
+            }
+            drawText(label, topLeft = Offset(at.x - label.size.width / 2f, at.y - label.size.height / 2f))
         }
     }
 }

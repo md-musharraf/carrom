@@ -15,4 +15,8 @@ interface GameRepository {
     fun setSelectedBoard(id: String)
     fun getTrickShotStars(levelId: Int): Int
     fun setTrickShotStars(levelId: Int, stars: Int)
+
+    /** How many times [counter] was used on [day]; 0 on any other day. */
+    fun getDailyCount(counter: String, day: Long): Int
+    fun setDailyCount(counter: String, day: Long, count: Int)
 }

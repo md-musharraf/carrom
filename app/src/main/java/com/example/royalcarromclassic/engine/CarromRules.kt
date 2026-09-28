@@ -31,6 +31,7 @@ object CarromRules {
     const val FOUL_PENALTY = 5
     const val QUEEN_COVER_BONUS = 25
     const val FREESTYLE_TARGET = 160
+    const val BLITZ_TARGET = 120
 
     fun evaluateShot(
         shooter: PlayerSlot,
@@ -113,15 +114,26 @@ object CarromRules {
 
     /** Who shoots next. Solo modes always return to player 1. */
     fun nextShooter(mode: GameMode, shooter: PlayerSlot, keepsTurn: Boolean): PlayerSlot = when {
-        mode == GameMode.PRACTICE || mode == GameMode.TRICK_SHOTS -> PlayerSlot.PLAYER1
+        isSolo(mode) -> PlayerSlot.PLAYER1
         keepsTurn -> shooter
         else -> shooter.opponent
     }
 
+    /** Modes with nobody sitting opposite. */
+    fun isSolo(mode: GameMode): Boolean =
+        mode == GameMode.PRACTICE || mode == GameMode.TRICK_SHOTS || mode == GameMode.LUCKY_SHOT
+
+    /** Points that end the match early, or null when only clearing the board ends it. */
+    fun targetScore(mode: GameMode): Int? = when (mode) {
+        GameMode.FREESTYLE -> FREESTYLE_TARGET
+        GameMode.BLITZ -> BLITZ_TARGET
+        else -> null
+    }
+
     /** The winner once the match is decided, or null while play continues. Ties go to player 1. */
     fun winnerOrNull(mode: GameMode, discsLeft: Int, player1Score: Int, player2Score: Int): PlayerSlot? {
-        val decided = discsLeft == 0 ||
-            (mode == GameMode.FREESTYLE && (player1Score >= FREESTYLE_TARGET || player2Score >= FREESTYLE_TARGET))
+        val target = targetScore(mode)
+        val decided = discsLeft == 0 || (target != null && (player1Score >= target || player2Score >= target))
         if (!decided) return null
         return if (player1Score >= player2Score) PlayerSlot.PLAYER1 else PlayerSlot.PLAYER2
     }

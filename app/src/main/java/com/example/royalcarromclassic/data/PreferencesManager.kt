@@ -112,4 +112,17 @@ class PreferencesManager(context: Context) : GameRepository {
             prefs.edit().putInt("trick_stars_$levelId", validStars).apply()
         }
     }
+
+    override fun getDailyCount(counter: String, day: Long): Int {
+        if (prefs.getLong("daily_${counter}_day", -1L) != day) return 0
+        return prefs.getInt("daily_${counter}_count", 0).coerceAtLeast(0)
+    }
+
+    override fun setDailyCount(counter: String, day: Long, count: Int) {
+        if (counter.isBlank()) return
+        prefs.edit()
+            .putLong("daily_${counter}_day", day)
+            .putInt("daily_${counter}_count", count.coerceAtLeast(0))
+            .apply()
+    }
 }

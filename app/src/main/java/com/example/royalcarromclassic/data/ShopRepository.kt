@@ -97,13 +97,13 @@ object ShopRepository {
             description = "Standard polished hardwood board with traditional Indian carrom geometric mandala.",
             price = 0,
             isUnlocked = true,
-            woodColor = Color(0xFF2A160C),
-            woodInner = Color(0xFF3D2012),
-            feltColor = Color(0xFFD6A873),
-            feltPatternColor = Color(0xFF8B5A2B),
-            centerCircleColor = Color(0xFFB91C1C),
-            pocketRimColor = Color(0xFFD97706),
-            accentGold = Color(0xFFFBBF24)
+            woodColor = Color(0xFF3E1F0F),
+            woodInner = Color(0xFF7A4424),
+            feltColor = Color(0xFFE4C690),
+            feltPatternColor = Color(0xFF24160E),
+            centerCircleColor = Color(0xFFB01E28),
+            pocketRimColor = Color(0xFFC9A227),
+            accentGold = Color(0xFFD4AF37)
         ),
         BoardTheme(
             id = "royal_indigo",
@@ -111,13 +111,13 @@ object ShopRepository {
             description = "Midnight blue plush velvet board with bright celestial gold markings.",
             price = 900,
             isUnlocked = false,
-            woodColor = Color(0xFF0F172A),
-            woodInner = Color(0xFF1E293B),
-            feltColor = Color(0xFF1E3A5F),
-            feltPatternColor = Color(0xFF60A5FA),
-            centerCircleColor = Color(0xFFEF4444),
-            pocketRimColor = Color(0xFFFBBF24),
-            accentGold = Color(0xFF60A5FA)
+            woodColor = Color(0xFF151B2C),
+            woodInner = Color(0xFF33415F),
+            feltColor = Color(0xFF23406B),
+            feltPatternColor = Color(0xFFD9C489),
+            centerCircleColor = Color(0xFFB8323A),
+            pocketRimColor = Color(0xFFD4AF37),
+            accentGold = Color(0xFFD4AF37)
         ),
         BoardTheme(
             id = "emerald_sanctuary",
@@ -125,13 +125,13 @@ object ShopRepository {
             description = "Lush green tournament felt inspired by international carrom championships.",
             price = 1800,
             isUnlocked = false,
-            woodColor = Color(0xFF1C1917),
-            woodInner = Color(0xFF292524),
-            feltColor = Color(0xFF155E42),
-            feltPatternColor = Color(0xFF34D399),
-            centerCircleColor = Color(0xFFDC2626),
-            pocketRimColor = Color(0xFFF59E0B),
-            accentGold = Color(0xFF34D399)
+            woodColor = Color(0xFF23180F),
+            woodInner = Color(0xFF4E3320),
+            feltColor = Color(0xFF1D5C40),
+            feltPatternColor = Color(0xFFE9DCB0),
+            centerCircleColor = Color(0xFFB8323A),
+            pocketRimColor = Color(0xFFD4AF37),
+            accentGold = Color(0xFFE9DCB0)
         ),
         BoardTheme(
             id = "vintage_mahogany",
@@ -139,13 +139,13 @@ object ShopRepository {
             description = "Rich dark mahogany with hand-carved mother-of-pearl borders and warm amber felt.",
             price = 3500,
             isUnlocked = false,
-            woodColor = Color(0xFF200C06),
-            woodInner = Color(0xFF3B160C),
-            feltColor = Color(0xFFC8955A),
-            feltPatternColor = Color(0xFF5C2D13),
-            centerCircleColor = Color(0xFF991B1B),
-            pocketRimColor = Color(0xFFEAB308),
-            accentGold = Color(0xFFFDE047)
+            woodColor = Color(0xFF2A0E07),
+            woodInner = Color(0xFF62220F),
+            feltColor = Color(0xFFD9AE74),
+            feltPatternColor = Color(0xFF2A140A),
+            centerCircleColor = Color(0xFF8E1B1B),
+            pocketRimColor = Color(0xFFD4AF37),
+            accentGold = Color(0xFFF2DC8F)
         ),
         BoardTheme(
             id = "cyber_matrix",

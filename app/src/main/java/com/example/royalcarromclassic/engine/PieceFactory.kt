@@ -11,15 +11,16 @@ import com.example.royalcarromclassic.data.Vector2D
  */
 object PieceFactory {
 
-    // Canonical piece colors — single source of truth
-    private val WHITE_PRIMARY = Color(0xFFF8FAFC)
-    private val WHITE_BORDER = Color(0xFF94A3B8)
-    private val BLACK_PRIMARY = Color(0xFF1E293B)
-    private val BLACK_BORDER = Color(0xFF0F172A)
-    private val QUEEN_PRIMARY = Color(0xFFEF4444)
-    private val QUEEN_BORDER = Color(0xFFB91C1C)
-    private val STRIKER_PRIMARY = Color(0xFFFBBF24)
-    private val STRIKER_BORDER = Color(0xFFB45309)
+    // Canonical piece colours — single source of truth. Classic turned-wood carrom men:
+    // natural boxwood whites, ebony blacks and a lacquered crimson queen.
+    private val WHITE_PRIMARY = Color(0xFFE9D9B6)
+    private val WHITE_BORDER = Color(0xFFA88A5E)
+    private val BLACK_PRIMARY = Color(0xFF2B1F19)
+    private val BLACK_BORDER = Color(0xFF0E0907)
+    private val QUEEN_PRIMARY = Color(0xFFB8232C)
+    private val QUEEN_BORDER = Color(0xFF63101A)
+    private val STRIKER_PRIMARY = Color(0xFFF5EDDC)
+    private val STRIKER_BORDER = Color(0xFFA88A5A)
 
     /**
      * Returns the canonical (primaryColor, borderColor) pair for a given [PieceType].

@@ -1,114 +1,88 @@
 package com.example.royalcarromclassic.ui
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.*
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.example.royalcarromclassic.data.TrickShotLevel
+import com.example.royalcarromclassic.theme.CarromPalette
+import com.example.royalcarromclassic.ui.components.*
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TrickShotsSheet(
-    isOpen: Boolean,
     levels: List<TrickShotLevel>,
     onSelectLevel: (Int) -> Unit,
     onDismiss: () -> Unit
 ) {
-    if (!isOpen) return
-
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = Color(0xFF0F172A),
-        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+    val solved = levels.count { it.stars > 0 }
+    ClassicSheet(
+        title = "Trick Shots",
+        subtitle = "$solved of ${levels.size} solved · earn 300 coins each",
+        onDismiss = onDismiss
     ) {
-        Column(
+        LazyColumn(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp)
-                .padding(bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+                .heightIn(max = 480.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Text(
-                text = "🎯 Trick Shot Challenges",
-                color = Color(0xFFFDE68A),
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Black
-            )
-
-            LazyColumn(
-                modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(levels) { lvl ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(if (lvl.isUnlocked) Color(0xFF090D16) else Color(0x60090D16))
-                            .border(
-                                1.dp,
-                                if (lvl.isUnlocked) Color(0xFF38BDF8) else Color(0xFF1E293B),
-                                RoundedCornerShape(16.dp)
-                            )
-                            .clickable(enabled = lvl.isUnlocked) {
-                                onSelectLevel(lvl.id)
-                                onDismiss()
-                            }
-                            .padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        // Level Number Circle
-                        Box(
-                            modifier = Modifier
-                                .size(36.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(if (lvl.isUnlocked) Color(0xFF0284C7) else Color(0xFF334155)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = if (lvl.isUnlocked) "#${lvl.id}" else "🔒",
-                                color = Color.White,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Black
-                            )
-                        }
-
-                        // Details
-                        Column(modifier = Modifier.weight(1f)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(lvl.title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                                Row {
-                                    for (i in 1..3) {
-                                        Text(
-                                            text = if (i <= lvl.stars) "⭐" else "☆",
-                                            fontSize = 11.sp,
-                                            color = Color(0xFFFBBF24)
-                                        )
-                                    }
-                                }
-                            }
-                            Text(lvl.description, color = Color(0xFF94A3B8), fontSize = 10.sp, maxLines = 1)
-                        }
-                    }
+            items(levels, key = { it.id }) { level ->
+                LevelCard(level) {
+                    onSelectLevel(level.id)
+                    onDismiss()
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun LevelCard(level: TrickShotLevel, onClick: () -> Unit) {
+    val accent = if (level.stars > 0) CarromPalette.Gold else CarromPalette.Parchment
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .alpha(if (level.isUnlocked) 1f else 0.55f)
+            .classicPanel(accent = accent, accentAlpha = if (level.isUnlocked) 0.3f else 0.1f, raised = level.isUnlocked)
+            .clickable(enabled = level.isUnlocked, role = Role.Button, onClick = onClick)
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Medallion(size = 40.dp, accent = if (level.isUnlocked) accent else CarromPalette.SilverDeep) {
+            if (level.isUnlocked) {
+                Text("${level.id}", style = MaterialTheme.typography.titleMedium, color = CarromPalette.Ink)
+            } else {
+                GlyphIcon(Glyph.Lock, size = 16.dp, tint = CarromPalette.Ink)
+            }
+        }
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    level.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = CarromPalette.Ivory,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                StarRating(level.stars)
+            }
+            Text(level.description, style = MaterialTheme.typography.bodySmall, color = CarromPalette.Parchment, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(
+                if (level.maxShots == 1) "1 SHOT" else "${level.maxShots} SHOTS",
+                style = MaterialTheme.typography.labelSmall,
+                color = CarromPalette.Muted
+            )
         }
     }
 }

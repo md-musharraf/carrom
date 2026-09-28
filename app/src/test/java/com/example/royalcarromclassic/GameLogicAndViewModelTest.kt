@@ -89,7 +89,7 @@ class GameLogicAndViewModelTest {
     fun testInitialGameState() {
         val state = viewModel.gameState.value
         assertEquals(GameMode.VS_AI, state.mode)
-        assertEquals("player1", state.currentTurn)
+        assertEquals(PlayerSlot.PLAYER1, state.currentTurn)
         assertEquals(TurnState.PLACING_STRIKER, state.turnState)
         assertFalse(state.isGameOver)
         assertNull(state.winner)

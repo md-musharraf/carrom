@@ -45,19 +45,22 @@ import com.example.royalcarromclassic.ui.components.classicPanel
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
-private const val ANGLE_STEP_DEGREES = 0.75f
+const val ANGLE_STEP_DEGREES = 0.75f
 private const val POWER_STEP = 2f
 private const val OFFSET_STEP = 0.01f
 
 /** What the hint line above the controls should say. */
 private enum class ControlHint(val text: String) {
     PLACE("Slide the striker, then pull it back to shoot"),
-    AIM("Touch the board to aim · pull the striker back to fire"),
+    AIM("Pull back to fire · your aim stays locked"),
     FOUL("On a foul circle — slide the striker clear"),
     MOVING("Discs in motion…"),
-    BOT("Bot Master is lining up a shot…"),
+    BOT("is lining up a shot…"),
+    ROLL("Roll the die to start your turn"),
     OVER("Match complete")
 }
+
+private val STEPPER = 40.dp
 
 @Composable
 fun StrikerControlsView(
@@ -67,17 +70,21 @@ fun StrikerControlsView(
     onNudgeAngle: (Float) -> Unit,
     onNudgePower: (Float) -> Unit,
     onShoot: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** Degrees per aim step; the Precision striker halves it. */
+    angleStep: Float = ANGLE_STEP_DEGREES
 ) {
-    val isBottom = gameState.isBottomTurn
+    val seat = gameState.currentSeat
     val enabled = gameState.canAim
-    val strikerPos = BoardGeometry.getBaselineStrikerPos(gameState.strikerBaselineOffset, isBottom)
-    val isFoulPosition = BoardGeometry.isOverBaselineCircle(strikerPos.x, strikerPos.y, isBottom)
+    val strikerPos = BoardGeometry.strikerPos(gameState.strikerBaselineOffset, seat)
+    val isFoulPosition = BoardGeometry.isOverBaselineCircle(strikerPos.x, strikerPos.y, seat)
+    val shooterName = gameState.player(gameState.currentTurn).name
 
     val hint = when {
         gameState.isGameOver -> ControlHint.OVER
         gameState.isAiTurn -> ControlHint.BOT
         gameState.turnState == TurnState.MOVING -> ControlHint.MOVING
+        gameState.needsRoll -> ControlHint.ROLL
         isFoulPosition -> ControlHint.FOUL
         gameState.turnState == TurnState.AIMING -> ControlHint.AIM
         else -> ControlHint.PLACE
@@ -100,7 +107,11 @@ fun StrikerControlsView(
             modifier = Modifier.fillMaxWidth()
         ) { current ->
             Text(
-                text = current.text,
+                text = when {
+                    current == ControlHint.BOT -> "$shooterName ${current.text}"
+                    gameState.playerCount > 2 && current == ControlHint.PLACE && !gameState.isAiTurn -> "$shooterName · ${current.text.lowercase()}"
+                    else -> current.text
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = when (current) {
                     ControlHint.FOUL -> CarromPalette.CrimsonLight
@@ -120,7 +131,7 @@ fun StrikerControlsView(
                 Glyph.ChevronLeft, "Move striker left",
                 onStep = { onPositionChanged(gameState.strikerBaselineOffset - OFFSET_STEP) },
                 enabled = enabled,
-                modifier = Modifier.size(32.dp)
+                modifier = Modifier.size(STEPPER)
             )
             BaselineRail(
                 fraction = gameState.strikerBaselineOffset,
@@ -129,19 +140,20 @@ fun StrikerControlsView(
                 onFractionChanged = onPositionChanged,
                 modifier = Modifier
                     .weight(1f)
-                    .height(34.dp)
+                    .height(STEPPER)
             )
             RepeatingGlyphButton(
                 Glyph.ChevronRight, "Move striker right",
                 onStep = { onPositionChanged(gameState.strikerBaselineOffset + OFFSET_STEP) },
                 enabled = enabled,
-                modifier = Modifier.size(32.dp)
+                modifier = Modifier.size(STEPPER)
             )
             ClassicButton(
                 text = "Strike",
                 onClick = onShoot,
                 enabled = enabled && !isFoulPosition,
-                height = 40.dp,
+                leading = Glyph.Bolt,
+                height = 48.dp,
                 horizontalPadding = 14.dp,
                 modifier = Modifier.padding(start = 2.dp)
             )
@@ -151,20 +163,20 @@ fun StrikerControlsView(
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             RepeatingGlyphButton(
                 Glyph.RotateCcw, "Rotate aim left",
-                onStep = { onNudgeAngle(-ANGLE_STEP_DEGREES) },
+                onStep = { onNudgeAngle(-angleStep) },
                 enabled = enabled,
-                modifier = Modifier.size(32.dp)
+                modifier = Modifier.size(STEPPER)
             )
             AimReadout(
                 angle = gameState.strikerAimAngle,
-                isBottom = isBottom,
-                modifier = Modifier.width(50.dp)
+                forward = BoardGeometry.forwardAngle(seat),
+                modifier = Modifier.width(54.dp)
             )
             RepeatingGlyphButton(
                 Glyph.RotateCw, "Rotate aim right",
-                onStep = { onNudgeAngle(ANGLE_STEP_DEGREES) },
+                onStep = { onNudgeAngle(angleStep) },
                 enabled = enabled,
-                modifier = Modifier.size(32.dp)
+                modifier = Modifier.size(STEPPER)
             )
             Spacer(Modifier.width(4.dp))
             PowerMeter(
@@ -180,8 +192,8 @@ fun StrikerControlsView(
 
 /** Aim as seen by the shooter: "0°" straight ahead, then degrees to their left (L) or right (R). */
 @Composable
-private fun AimReadout(angle: Float, isBottom: Boolean, modifier: Modifier = Modifier) {
-    val deviation = BoardGeometry.normalizeAngle(angle - BoardGeometry.forwardAngle(isBottom)) * BoardGeometry.RAD_TO_DEG
+private fun AimReadout(angle: Float, forward: Float, modifier: Modifier = Modifier) {
+    val deviation = BoardGeometry.normalizeAngle(angle - forward) * BoardGeometry.RAD_TO_DEG
     val degrees = abs(deviation).roundToInt()
     val label = when {
         degrees == 0 -> "0°"
@@ -293,13 +305,13 @@ private fun PowerMeter(
     val shown by animateFloatAsState(fraction, spring(stiffness = Spring.StiffnessMediumLow), label = "powerFill")
 
     Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        RepeatingGlyphButton(Glyph.Minus, "Less power", onStep = { onNudge(-POWER_STEP) }, enabled = enabled, modifier = Modifier.size(32.dp))
+        RepeatingGlyphButton(Glyph.Minus, "Less power", onStep = { onNudge(-POWER_STEP) }, enabled = enabled, modifier = Modifier.size(STEPPER))
         Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
             Text("POWER ${power.roundToInt()}%", style = MaterialTheme.typography.labelSmall, color = CarromPalette.Muted, maxLines = 1)
             Canvas(
                 Modifier
                     .fillMaxWidth()
-                    .height(12.dp)
+                    .height(18.dp)
                     .semantics { contentDescription = "Shot power ${power.roundToInt()} percent" }
                     .pointerInput(enabled) {
                         if (!enabled) return@pointerInput
@@ -331,6 +343,6 @@ private fun PowerMeter(
                 drawRoundRect(tensionColor(shown).copy(alpha = 0.6f), cornerRadius = corner, style = Stroke(1f))
             }
         }
-        RepeatingGlyphButton(Glyph.Plus, "More power", onStep = { onNudge(POWER_STEP) }, enabled = enabled, modifier = Modifier.size(32.dp))
+        RepeatingGlyphButton(Glyph.Plus, "More power", onStep = { onNudge(POWER_STEP) }, enabled = enabled, modifier = Modifier.size(STEPPER))
     }
 }

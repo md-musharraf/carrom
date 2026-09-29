@@ -36,6 +36,15 @@ class MockGameRepository : GameRepository {
     private val daily = mutableMapOf<String, Pair<Long, Int>>()
     override fun getDailyCount(counter: String, day: Long): Int = daily[counter]?.takeIf { it.first == day }?.second ?: 0
     override fun setDailyCount(counter: String, day: Long, count: Int) { daily[counter] = day to count }
+    val selections = mutableMapOf<String, String>()
+    override fun getSelection(category: String, default: String): String = selections[category] ?: default
+    override fun setSelection(category: String, id: String) { selections[category] = id }
+    val flags = mutableMapOf<String, Boolean>()
+    override fun getFlag(key: String, default: Boolean): Boolean = flags[key] ?: default
+    override fun setFlag(key: String, value: Boolean) { flags[key] = value }
+    val bests = mutableMapOf<String, Int>()
+    override fun getBest(key: String): Int = bests[key] ?: 0
+    override fun setBest(key: String, value: Int) { bests[key] = value }
 }
 
 class MockAudioEngine : AudioEngine {

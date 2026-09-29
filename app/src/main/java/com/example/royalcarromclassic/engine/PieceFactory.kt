@@ -3,6 +3,7 @@ package com.example.royalcarromclassic.engine
 import androidx.compose.ui.graphics.Color
 import com.example.royalcarromclassic.data.Piece
 import com.example.royalcarromclassic.data.PieceType
+import com.example.royalcarromclassic.data.Seat
 import com.example.royalcarromclassic.data.Vector2D
 
 /**
@@ -72,13 +73,18 @@ object PieceFactory {
     /**
      * Creates a striker piece positioned on the baseline.
      */
-    fun createStriker(fraction: Float = 0.5f, isBottom: Boolean = true): Piece {
-        val pos = BoardGeometry.getBaselineStrikerPos(fraction, isBottom)
+    fun createStriker(fraction: Float = 0.5f, isBottom: Boolean = true): Piece =
+        createStriker(fraction, if (isBottom) Seat.BOTTOM else Seat.TOP)
+
+    /** Creates a striker on [seat]'s baseline; [mass] varies with the striker's weight offline. */
+    fun createStriker(fraction: Float, seat: Seat, mass: Float = BoardGeometry.STRIKER_MASS): Piece {
+        val pos = BoardGeometry.strikerPos(fraction, seat)
         return createPiece(
             id = "striker",
             type = PieceType.STRIKER,
             x = pos.x,
-            y = pos.y
+            y = pos.y,
+            mass = mass
         )
     }
 

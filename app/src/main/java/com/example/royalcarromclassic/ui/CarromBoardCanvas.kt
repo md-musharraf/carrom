@@ -8,6 +8,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.awaitDragOrCancellation
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.awaitTouchSlopOrCancellation
@@ -27,7 +28,11 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.AwaitPointerEventScope
+import androidx.compose.ui.input.pointer.PointerId
+import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.drawText
@@ -38,28 +43,31 @@ import com.example.royalcarromclassic.engine.BoardEffects
 import com.example.royalcarromclassic.engine.BoardGeometry
 import com.example.royalcarromclassic.engine.CarromPhysicsEngine.TrajectoryData
 import com.example.royalcarromclassic.engine.LuckyShot
+import com.example.royalcarromclassic.engine.Powers
 import com.example.royalcarromclassic.theme.CarromPalette
 import com.example.royalcarromclassic.ui.board.BoardArt
-import com.example.royalcarromclassic.ui.board.PieceArt
+import com.example.royalcarromclassic.ui.board.CoinSetArt
+import com.example.royalcarromclassic.ui.board.ShotGesture
 import com.example.royalcarromclassic.ui.board.StrikerArt
 import com.example.royalcarromclassic.ui.board.drawAimGuide
 import com.example.royalcarromclassic.ui.board.drawCarromBoard
 import com.example.royalcarromclassic.ui.board.drawCarromMan
 import com.example.royalcarromclassic.ui.board.drawPullBand
 import com.example.royalcarromclassic.ui.board.drawStriker
-import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.hypot
 
-private const val STRIKER_TOUCH_SLOP = 30f
-private const val RAIL_TOUCH_SLOP = 36f
-private const val MIN_PULL = 18f
-private const val MAX_PULL = 150f
+/** Pull distances and touch targets are set in dp, so the slingshot feels the same on every screen. */
+private val MIN_PULL_DP = 14.dp
+private val MAX_PULL_DP = 112.dp
+private val FINGERTIP_DP = 30.dp
+private val RAIL_SLOP_DP = 20.dp
 
 private val ZeroState: State<Float> = object : State<Float> {
     override val value: Float = 0f
 }
 private val haloStroke = Stroke(width = 2f)
+private val wideRingStroke = Stroke(width = 2.2f)
 
 /**
  * The carrom board, rendered in two layers:
@@ -67,8 +75,9 @@ private val haloStroke = Stroke(width = 2f)
  *    only re-rasterised when the board theme changes;
  *  - a dynamic layer (discs, striker, guide, effects) redrawn when [frameTick] advances.
  *
- * Touch model: drag the striker sideways (or anywhere on the rail) to place it, pull it
- * backwards like a slingshot and release to shoot, or touch the board elsewhere to aim at a point.
+ * Touch model (see [ShotGesture]): drag the striker along its baseline (or touch the rail) to
+ * place it, pull it back like a slingshot and release to shoot, or touch the board anywhere to aim
+ * at that point. Works from any of the four seats.
  */
 @Composable
 fun CarromBoardCanvas(
@@ -76,6 +85,7 @@ fun CarromBoardCanvas(
     striker: Piece?,
     boardTheme: BoardTheme,
     strikerConfig: StrikerConfig,
+    coinSet: CoinSet,
     gameState: GameState,
     aimPreview: TrajectoryData?,
     effects: BoardEffects,
@@ -83,26 +93,25 @@ fun CarromBoardCanvas(
     onPositionChanged: (Float) -> Unit,
     onAimChanged: (angle: Float, power: Float) -> Unit,
     onShoot: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** How wide the table's pockets are cut (the Wide Pockets board). */
+    pocketScale: Float = 1f,
+    /** How strongly a pull snaps onto the aim chosen by touching the board. */
+    aimMagnetDegrees: Float = 5f
 ) {
-    val boardArt = remember(boardTheme) { BoardArt(boardTheme) }
-    val whiteArt = remember { PieceArt.forType(PieceType.WHITE) }
-    val blackArt = remember { PieceArt.forType(PieceType.BLACK) }
-    val queenArt = remember { PieceArt.forType(PieceType.QUEEN) }
+    val boardArt = remember(boardTheme, pocketScale) { BoardArt(boardTheme, pocketScale) }
+    val discRadius = pieces.firstOrNull()?.radius ?: BoardGeometry.PUCK_RADIUS
+    val coinArt = remember(coinSet, discRadius) { CoinSetArt(coinSet, discRadius) }
     val strikerArt = remember(strikerConfig) { StrikerArt(strikerConfig) }
-    fun artFor(type: PieceType) = when (type) {
-        PieceType.WHITE -> whiteArt
-        PieceType.BLACK -> blackArt
-        else -> queenArt
-    }
 
     val canAim = gameState.canAim
     val showGuide = aimPreview != null && !gameState.isGameOver
+    val widePocketRoll = gameState.dice?.face == DiceFace.WIDE_POCKETS && gameState.turnState != TurnState.MOVING
 
     // The marching guide and the "ready" halo only animate while the player can act.
     val phase: State<Float>
     val pulse: State<Float>
-    if (showGuide && canAim) {
+    if ((showGuide && canAim) || widePocketRoll) {
         val transition = rememberInfiniteTransition(label = "aimGuide")
         phase = transition.animateFloat(
             0f, 1f, infiniteRepeatable(tween(900, easing = LinearEasing)), label = "guidePhase"
@@ -116,9 +125,12 @@ fun CarromBoardCanvas(
     }
 
     var pullPoint by remember { mutableStateOf<Offset?>(null) }
+    var pullArmed by remember { mutableStateOf(false) }
 
     val currentStriker by rememberUpdatedState(striker)
     val currentState by rememberUpdatedState(gameState)
+    val currentPieces by rememberUpdatedState(pieces)
+    val currentMagnet by rememberUpdatedState(aimMagnetDegrees)
     val currentOnPosition by rememberUpdatedState(onPositionChanged)
     val currentOnAim by rememberUpdatedState(onAimChanged)
     val currentOnShoot by rememberUpdatedState(onShoot)
@@ -137,13 +149,19 @@ fun CarromBoardCanvas(
 
                     val scale = size.width / BoardGeometry.BOARD_SIZE
                     fun toBoard(p: Offset) = Offset(p.x / scale, p.y / scale)
+                    fun dpUnits(dp: Dp) = dp.toPx() / scale
+                    val minPull = dpUnits(MIN_PULL_DP)
+                    val maxPull = maxOf(dpUnits(MAX_PULL_DP), minPull + 60f)
+                    val seat = state.currentSeat
                     val start = toBoard(down.position)
-                    val baselineY = if (state.isBottomTurn) BoardGeometry.BASELINE_BOTTOM_Y else BoardGeometry.BASELINE_TOP_Y
-                    val onStriker = hypot(start.x - s.x, start.y - s.y) < s.radius + STRIKER_TOUCH_SLOP
-                    val onRail = abs(start.y - baselineY) < RAIL_TOUCH_SLOP &&
-                        start.x in (BoardGeometry.BASELINE_START_X - RAIL_TOUCH_SLOP)..(BoardGeometry.BASELINE_END_X + RAIL_TOUCH_SLOP)
+                    val onStriker = ShotGesture.touchesStriker(start.x, start.y, s.x, s.y, s.radius, dpUnits(FINGERTIP_DP))
+                    val onDisc = currentPieces.any { !it.isPocketed && hypot(it.x - start.x, it.y - start.y) < it.radius + 4f }
+                    val onRail = !onDisc && ShotGesture.touchesRail(start.x, start.y, seat, dpUnits(RAIL_SLOP_DP))
+                    // A pull that lines up with an aim chosen by touching the board keeps that aim.
+                    val lockedAngle = state.strikerAimAngle.takeIf { state.turnState == TurnState.AIMING }
+                    val magnet = currentMagnet * BoardGeometry.DEG_TO_RAD
 
-                    fun slideTo(p: Offset) = currentOnPosition(BoardGeometry.baselineFractionAt(p.x))
+                    fun slideTo(p: Offset) = currentOnPosition(BoardGeometry.baselineFractionAt(p.x, p.y, seat))
                     fun aimAt(p: Offset) {
                         if (hypot(p.x - s.x, p.y - s.y) > s.radius) {
                             currentOnAim(atan2(p.y - s.y, p.x - s.x), currentState.strikerPower)
@@ -151,41 +169,55 @@ fun CarromBoardCanvas(
                     }
                     fun pullTo(p: Offset) {
                         pullPoint = p
-                        val dx = p.x - s.x
-                        val dy = p.y - s.y
-                        val dist = hypot(dx, dy)
-                        if (dist >= MIN_PULL) {
-                            val fraction = ((dist - MIN_PULL) / (MAX_PULL - MIN_PULL)).coerceIn(0f, 1f)
-                            val power = BoardGeometry.MIN_POWER + fraction * (BoardGeometry.MAX_POWER - BoardGeometry.MIN_POWER)
-                            currentOnAim(atan2(-dy, -dx), power)
+                        val pull = ShotGesture.pull(s.x, s.y, p.x, p.y, minPull, maxPull, lockedAngle, magnet)
+                        pullArmed = pull != null
+                        if (pull != null) currentOnAim(pull.angle, pull.power)
+                    }
+                    suspend fun AwaitPointerEventScope.pullFrom(pointer: PointerId, at: Offset) {
+                        pullTo(at)
+                        val completed = drag(pointer) { change ->
+                            change.consume()
+                            pullTo(toBoard(change.position))
                         }
+                        val armed = pullArmed
+                        pullPoint = null
+                        pullArmed = false
+                        if (completed && armed) currentOnShoot()
                     }
 
                     when {
                         onStriker -> {
-                            var slingshot = false
+                            var kind = ShotGesture.Kind.PULL
                             val first = awaitTouchSlopOrCancellation(down.id) { change, over ->
                                 change.consume()
-                                val backward = if (state.isBottomTurn) over.y else -over.y
-                                slingshot = backward > abs(over.x) * 0.5f
+                                kind = ShotGesture.classify(over.x, over.y, seat)
                             } ?: return@awaitEachGesture
 
-                            if (slingshot) {
-                                pullTo(toBoard(first.position))
-                                val completed = drag(first.id) { change ->
-                                    change.consume()
-                                    pullTo(toBoard(change.position))
+                            when (kind) {
+                                ShotGesture.Kind.PULL -> pullFrom(first.id, toBoard(first.position))
+                                ShotGesture.Kind.AIM -> {
+                                    aimAt(toBoard(first.position))
+                                    drag(first.id) { change ->
+                                        change.consume()
+                                        aimAt(toBoard(change.position))
+                                    }
                                 }
-                                val released = pullPoint
-                                pullPoint = null
-                                if (completed && released != null && hypot(released.x - s.x, released.y - s.y) >= MIN_PULL) {
-                                    currentOnShoot()
-                                }
-                            } else {
-                                slideTo(toBoard(first.position))
-                                drag(first.id) { change ->
-                                    change.consume()
-                                    slideTo(toBoard(change.position))
+                                ShotGesture.Kind.SLIDE -> {
+                                    slideTo(toBoard(first.position))
+                                    // Slide until the finger lifts; if it drifts back behind the
+                                    // baseline part-way, carry on as a pull from there.
+                                    while (true) {
+                                        val change = awaitDragOrCancellation(first.id) ?: break
+                                        if (change.changedToUp()) break
+                                        change.consume()
+                                        val p = toBoard(change.position)
+                                        val now = currentStriker ?: break
+                                        if (ShotGesture.escalatesToPull(p.x, p.y, now.x, now.y, seat)) {
+                                            pullFrom(change.id, p)
+                                            break
+                                        }
+                                        slideTo(p)
+                                    }
                                 }
                             }
                         }
@@ -226,6 +258,8 @@ fun CarromBoardCanvas(
             inBoardUnits {
                 effects.particles.draw(this)
 
+                if (widePocketRoll) drawWidePockets(pocketScale * Powers.WIDE_POCKET_DICE_SCALE, pulse.value)
+
                 if (showGuide) {
                     drawAimGuide(aimPreview, phase.value, pulse.value, subdued = !canAim)
                 }
@@ -234,12 +268,12 @@ fun CarromBoardCanvas(
                 for (i in pieces.indices) {
                     val p = pieces[i]
                     if (p.isPocketed && p.pocketProgress > 0f) drawSinking(p) { x, y, scale, alpha ->
-                        drawCarromMan(artFor(p.type), x, y, scale, alpha, shadowAlpha = alpha)
+                        drawCarromMan(coinArt.forType(p.type), x, y, scale, alpha, shadowAlpha = alpha)
                     }
                 }
                 for (i in pieces.indices) {
                     val p = pieces[i]
-                    if (!p.isPocketed) drawCarromMan(artFor(p.type), p.x, p.y)
+                    if (!p.isPocketed) drawCarromMan(coinArt.forType(p.type), p.x, p.y)
                 }
 
                 if (striker != null) {
@@ -248,11 +282,21 @@ fun CarromBoardCanvas(
                     if (pull != null && !striker.isPocketed) {
                         val fraction = (gameState.strikerPower - BoardGeometry.MIN_POWER) /
                             (BoardGeometry.MAX_POWER - BoardGeometry.MIN_POWER)
-                        drawPullBand(striker.x, striker.y, striker.radius, pull, fraction)
+                        drawPullBand(striker.x, striker.y, striker.radius, pull, fraction, armed = pullArmed)
                     }
                 }
             }
         }
+    }
+}
+
+/** Glowing rings showing how wide the pockets play after a Wide Pockets roll. */
+private fun DrawScope.drawWidePockets(scale: Float, pulse: Float) {
+    for (pocket in BoardGeometry.POCKETS) {
+        val c = Offset(pocket.x, pocket.y)
+        val r = pocket.radius * scale
+        drawCircle(CarromPalette.Jade, r, c, alpha = 0.16f)
+        drawCircle(CarromPalette.Jade, r + 2f + pulse * 4f, c, alpha = 0.7f * (1f - pulse), style = wideRingStroke)
     }
 }
 

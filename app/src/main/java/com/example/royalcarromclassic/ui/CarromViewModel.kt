@@ -23,6 +23,7 @@ import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.sin
+import kotlin.random.Random
 
 /**
  * Game state, turn flow, rewards and the frame-driven game loop.
@@ -40,6 +41,7 @@ class CarromViewModel @JvmOverloads constructor(
     val sound: AudioEngine = SoundSynthesizer(application),
     val haptic: HapticEngine = HapticController(application),
     private val online: OnlineMatchSource? = (application as? OnlineHost)?.online?.matches,
+    private val random: Random = Random.Default,
     private val clock: () -> Long = System::currentTimeMillis
 ) : AndroidViewModel(application) {
 
@@ -87,6 +89,16 @@ class CarromViewModel @JvmOverloads constructor(
     )
     val boards: StateFlow<List<BoardTheme>> = _boards.asStateFlow()
 
+    private val _coinSets = MutableStateFlow(
+        ShopRepository.COIN_SETS.map { it.copy(isUnlocked = repository.isUnlocked(it.id, it.isUnlocked)) }
+    )
+    val coinSets: StateFlow<List<CoinSet>> = _coinSets.asStateFlow()
+
+    private val _dice = MutableStateFlow(
+        ShopRepository.DICE.map { it.copy(isUnlocked = repository.isUnlocked(it.id, it.isUnlocked)) }
+    )
+    val dice: StateFlow<List<DiceSkin>> = _dice.asStateFlow()
+
     private val _trickShotLevels = MutableStateFlow(
         TrickShotsManager.LEVELS.map {
             it.copy(
@@ -117,11 +129,28 @@ class CarromViewModel @JvmOverloads constructor(
     /** The online match being played, or null offline. */
     private var session: OnlineSession? = null
 
+    /** How the table plays this match (board and coin powers), fixed when the match starts. */
+    private var tableTuning = CarromPhysicsEngine.PhysicsTuning.STANDARD
+
+    /** The table plus the shooter's striker and die, for the shot in play. */
+    private var shotTuning = CarromPhysicsEngine.PhysicsTuning.STANDARD
+
+    /** The coin set's power this match (Midas pays out when the match is won). */
+    private var matchCoinPower = CoinPower.BALANCED
+
+    /** The last local match set-up, so a rematch plays the same table. */
+    private var lastConfig: MatchConfig? = null
+    private var diceJob: Job? = null
+    private var timeAttackJob: Job? = null
+
     init {
         _gameState.update {
             it.copy(
                 selectedStrikerId = repository.getSelectedStriker(),
-                selectedBoardId = repository.getSelectedBoard()
+                selectedBoardId = repository.getSelectedBoard(),
+                selectedCoinSetId = repository.getSelection(SELECTION_COINS, DEFAULT_COIN_SET),
+                selectedDiceId = repository.getSelection(SELECTION_DICE, DEFAULT_DICE),
+                powersEnabled = repository.getFlag(FLAG_POWERS, true)
             )
         }
         startNewGame(GameMode.VS_AI, AIDifficulty.MEDIUM)
@@ -192,7 +221,8 @@ class CarromViewModel @JvmOverloads constructor(
                 haptic.vibratePocket()
                 effects.particles.spawnPocketVortex(pocket.x, pocket.y)
                 if (piece.type != PieceType.STRIKER) refreshBoardSummary()
-            }
+            },
+            tuning = shotTuning
         )
 
         if (stillMoving && simulationSeconds > MAX_SIMULATION_SECONDS) {
@@ -208,24 +238,95 @@ class CarromViewModel @JvmOverloads constructor(
 
     // region Game setup
 
+    /** Starts [mode] with its usual line-up (you against the bot, or two people for Pass & Play). */
     fun startNewGame(mode: GameMode, difficulty: AIDifficulty = AIDifficulty.MEDIUM) {
-        when (mode) {
+        startMatch(MatchConfig(mode, defaultSeats(mode), difficulty))
+    }
+
+    /** Starts a local match from the set-up sheet: two to four seats, people or bots, optionally doubles. */
+    fun startMatch(config: MatchConfig) {
+        when (config.mode) {
             GameMode.TRICK_SHOTS -> return startTrickShotLevel(currentTrickLevelId)
             GameMode.LUCKY_SHOT -> return startLuckyShot()
+            GameMode.TIME_ATTACK -> return startTimeAttack()
             // Online matches start from the lobby, when the server pairs two players.
             GameMode.ONLINE -> return
             else -> Unit
         }
-        resetBoard(CarromPhysicsEngine.generateClassicCluster())
-        val opponent = when (mode) {
-            GameMode.VS_AI, GameMode.BLITZ -> PlayerData("Bot Master", "AI")
-            else -> PlayerData("Player 2", "P2")
+        val mode = config.mode
+        val seats = normalizedSeats(config)
+        val doubles = seats.size == 4 && (config.doubles || mode == GameMode.DISC_POOL)
+        lastConfig = config.copy(seats = seats, doubles = doubles)
+
+        val powers = beginTable(mode)
+        resetBoard(tableCluster(powers))
+        var bots = 0
+        val players = seats.mapIndexed { i, seat ->
+            val team = if (doubles) i % 2 else -1
+            PlayerData(
+                name = seat.name.trim().ifEmpty { if (seat.isBot) BOT_NAMES[bots % BOT_NAMES.size] else "Player ${i + 1}" },
+                monogram = if (seat.isBot) (if (bots++ == 0) "AI" else "B${bots}") else "P${i + 1}",
+                isBot = seat.isBot,
+                team = team,
+                // Disc Pool: seats alternate white and black, so partners (opposite) share a colour.
+                assignedColor = if (mode == GameMode.DISC_POOL) DiscPoolRules.colourOf(i % 2) else null
+            )
         }
+        val die = if (powers) equippedDice().power else DicePower.FAIR
         _gameState.update {
-            it.freshMatch(mode).copy(aiDifficulty = difficulty, player2 = opponent)
+            it.freshMatch(mode).copy(
+                aiDifficulty = config.difficulty,
+                players = players,
+                seats = Seat.layoutFor(players.size),
+                powersActive = powers,
+                dice = if (mode == GameMode.DICE) DiceStatus(rerollsLeft = Powers.rerollsPerMatch(die)) else null
+            )
         }
         startTurn(PlayerSlot.PLAYER1)
-        if (mode == GameMode.BLITZ) showToast("Blitz: first to ${CarromRules.BLITZ_TARGET} · ${BLITZ_SHOT_MILLIS / 1000}s a shot")
+        when (mode) {
+            GameMode.BLITZ -> showToast("Blitz: first to ${CarromRules.BLITZ_TARGET} · ${BLITZ_SHOT_MILLIS / 1000}s a shot")
+            GameMode.DICE -> showToast("Dice Carrom: roll, then shoot · first to ${CarromRules.DICE_TARGET}")
+            GameMode.DISC_POOL -> showToast("You play white: pocket all nine, cover the queen first")
+            else -> if (doubles) showToast("Doubles: partners sit opposite each other")
+        }
+    }
+
+    /** The seats [mode] starts with when no set-up sheet was used. */
+    private fun defaultSeats(mode: GameMode): List<SeatSetup> = when (mode) {
+        GameMode.PASS_AND_PLAY -> listOf(SeatSetup("", false), SeatSetup("", false))
+        GameMode.PRACTICE -> listOf(SeatSetup("", false))
+        else -> listOf(SeatSetup("", false), SeatSetup(BOT_NAMES[0], true))
+    }
+
+    /** Solo modes seat one player; Blitz is always one against the bot; Disc Pool needs 2 or 4. */
+    private fun normalizedSeats(config: MatchConfig): List<SeatSetup> {
+        val seats = config.seats.take(4).ifEmpty { defaultSeats(config.mode) }
+        return when (config.mode) {
+            GameMode.PRACTICE -> seats.take(1).map { it.copy(isBot = false) }
+            GameMode.VS_AI, GameMode.BLITZ -> listOf(seats.first().copy(isBot = false), seats.getOrNull(1)?.copy(isBot = true) ?: SeatSetup(BOT_NAMES[0], true))
+            GameMode.DISC_POOL -> if (seats.size >= 4) seats.take(4) else seats.take(2).let { if (it.size < 2) defaultSeats(GameMode.VS_AI) else it }
+            else -> if (seats.size < 2) defaultSeats(config.mode) else seats
+        }
+    }
+
+    /**
+     * Fixes the table's physics for a new match of [mode] and returns whether loadout powers apply.
+     * Powers are off online (the server simulates the standard table) and in the calibrated
+     * challenges (trick shots, Lucky Shot).
+     */
+    private fun beginTable(mode: GameMode): Boolean {
+        val powers = _gameState.value.powersEnabled && mode in POWER_MODES
+        val board = activeBoardTheme()
+        val coins = equippedCoinSet()
+        tableTuning = if (powers) Powers.tableTuning(board.power, coins.power) else CarromPhysicsEngine.PhysicsTuning.STANDARD
+        shotTuning = tableTuning
+        matchCoinPower = if (powers) coins.power else CoinPower.BALANCED
+        return powers
+    }
+
+    private fun tableCluster(powers: Boolean): List<Piece> {
+        val coins = if (powers) equippedCoinSet().power else CoinPower.BALANCED
+        return CarromPhysicsEngine.generateClassicCluster(Powers.discRadius(coins), Powers.discMass(coins))
     }
 
     /** Replays the current match (or the current trick shot level) from the start. */
@@ -234,10 +335,14 @@ class CarromViewModel @JvmOverloads constructor(
         when (state.mode) {
             GameMode.TRICK_SHOTS -> startTrickShotLevel(currentTrickLevelId)
             GameMode.LUCKY_SHOT -> startLuckyShot()
+            GameMode.TIME_ATTACK -> startTimeAttack()
             GameMode.ONLINE -> Unit
-            else -> startNewGame(state.mode, state.aiDifficulty)
+            else -> startMatch(lastConfig?.takeIf { it.mode == state.mode } ?: MatchConfig(state.mode, defaultSeats(state.mode), state.aiDifficulty))
         }
     }
+
+    /** The line-up of the last local match, to pre-fill the set-up sheet. */
+    fun lastMatchConfig(): MatchConfig? = lastConfig
 
     /** The next trick shot level, if it exists and is unlocked. */
     fun nextTrickShotLevelId(): Int? =
@@ -246,12 +351,13 @@ class CarromViewModel @JvmOverloads constructor(
     fun startTrickShotLevel(levelId: Int) {
         val level = _trickShotLevels.value.find { it.id == levelId } ?: return
         currentTrickLevelId = level.id
+        beginTable(GameMode.TRICK_SHOTS)
         resetBoard(PieceFactory.createTrickShotPieces(level.id, level.pieces))
 
         val offset = BoardGeometry.baselineFractionAt(level.strikerPos.x)
         _gameState.update {
             it.freshMatch(GameMode.TRICK_SHOTS).copy(
-                player2 = PlayerData("Trick Shot", "#${level.id}"),
+                players = listOf(PlayerData("Player 1", "P1"), PlayerData("Trick Shot", "#${level.id}")),
                 trickShot = TrickShotStatus(level.id, level.title, level.hint, shotsTaken = 0, maxShots = level.maxShots)
             )
         }
@@ -269,10 +375,11 @@ class CarromViewModel @JvmOverloads constructor(
             showToast("No Lucky Shots left today. Come back tomorrow!")
             return
         }
+        beginTable(GameMode.LUCKY_SHOT)
         resetBoard(LuckyShot.setup())
         _gameState.update {
             it.freshMatch(GameMode.LUCKY_SHOT).copy(
-                player2 = PlayerData("Lucky Shot", "LS"),
+                players = listOf(PlayerData("Player 1", "P1"), PlayerData("Lucky Shot", "LS")),
                 luckyShot = LuckyShotStatus(attemptsLeft = left)
             )
         }
@@ -280,20 +387,46 @@ class CarromViewModel @JvmOverloads constructor(
         showToast("Send the lucky disc into the rings!")
     }
 
+    /** Time Attack: [TIME_ATTACK_MILLIS] to pocket as many points as possible. */
+    fun startTimeAttack() {
+        val powers = beginTable(GameMode.TIME_ATTACK)
+        resetBoard(tableCluster(powers))
+        lastConfig = null
+        val deadline = clock() + TIME_ATTACK_MILLIS
+        val seconds = TIME_ATTACK_MILLIS / 1000f
+        _gameState.update {
+            it.freshMatch(GameMode.TIME_ATTACK).copy(
+                players = listOf(PlayerData("Player 1", "P1")),
+                seats = Seat.layoutFor(1),
+                powersActive = powers,
+                timeAttack = TimeAttackStatus(deadline, seconds, best = repository.getBest(BEST_TIME_ATTACK)),
+                turnClock = TurnClock(deadline, seconds)
+            )
+        }
+        startTurn(PlayerSlot.PLAYER1)
+        armTimeAttackClock()
+        showToast("Time Attack: ${TIME_ATTACK_MILLIS / 1000} seconds · go!")
+    }
+
     /** State for a new match of [mode]: scores, queen, challenges and online details reset. */
     private fun GameState.freshMatch(mode: GameMode) = copy(
         mode = mode,
         isGameOver = false,
         winner = null,
-        player1 = PlayerData("Player 1", "P1"),
-        player2 = PlayerData("Player 2", "P2"),
+        players = listOf(PlayerData("Player 1", "P1"), PlayerData("Player 2", "P2")),
+        seats = Seat.layoutFor(2),
         queenPottedBy = null,
         queenNeedsCover = false,
         queenCovered = false,
         trickShot = null,
         luckyShot = null,
         online = null,
+        dice = null,
+        timeAttack = null,
         turnClock = null,
+        powersActive = false,
+        shotsPlayed = 0,
+        matchCoins = 0,
         toastMessage = null
     )
 
@@ -302,6 +435,8 @@ class CarromViewModel @JvmOverloads constructor(
         aiDirector.cancel()
         glide.cancel()
         turnJob?.cancel()
+        diceJob?.cancel()
+        timeAttackJob?.cancel()
         isSimulating = false
         pocketedThisShot.clear()
         effects.clear()
@@ -314,21 +449,27 @@ class CarromViewModel @JvmOverloads constructor(
         offset: Float = 0.5f,
         power: Float = BoardGeometry.DEFAULT_POWER
     ) {
-        val isBottom = slot == PlayerSlot.PLAYER1
-        _striker.value = PieceFactory.createStriker(offset, isBottom)
+        val state = _gameState.value
+        val seat = state.seatOf(slot)
+        _striker.value = PieceFactory.createStriker(offset, seat, mass = strikerMassFor(state, slot))
         effects.onStrikerPlaced()
         _gameState.update {
             it.copy(
                 currentTurn = slot,
                 turnState = TurnState.PLACING_STRIKER,
                 strikerBaselineOffset = offset,
-                strikerAimAngle = BoardGeometry.forwardAngle(isBottom),
-                strikerPower = power
+                strikerAimAngle = BoardGeometry.forwardAngle(seat),
+                strikerPower = power,
+                dice = it.dice?.copy(face = null, rolling = false)
             )
         }
+        shotTuning = tableTuning
         refreshAimPreview()
-        if (_gameState.value.mode == GameMode.BLITZ) startShotClock(slot)
-        if (_gameState.value.isAiTurn) scheduleAIShot()
+        val next = _gameState.value
+        if (next.mode == GameMode.BLITZ) startShotClock(slot)
+        if (next.isAiTurn) {
+            if (next.dice != null) rollDice(forBot = true) else scheduleAIShot()
+        }
         requestFrames()
     }
 
@@ -340,7 +481,7 @@ class CarromViewModel @JvmOverloads constructor(
         val state = _gameState.value
         if (state.isGameOver || state.turnState == TurnState.MOVING) return
         val clamped = fraction.coerceIn(BoardGeometry.MIN_BASELINE_FRACTION, BoardGeometry.MAX_BASELINE_FRACTION)
-        val pos = BoardGeometry.getBaselineStrikerPos(clamped, state.isBottomTurn)
+        val pos = BoardGeometry.strikerPos(clamped, state.currentSeat)
         _striker.value?.let {
             it.x = pos.x
             it.y = pos.y
@@ -387,20 +528,28 @@ class CarromViewModel @JvmOverloads constructor(
         val state = _gameState.value
         val striker = _striker.value ?: return
         if (state.isGameOver || state.turnState == TurnState.MOVING || striker.isPocketed ||
-            state.isRemoteTurn || state.online?.syncing == true
+            state.isRemoteTurn || state.online?.syncing == true || state.needsRoll
         ) return
-        launchStriker(activeStrikerConfig().powerMultiplier)
-        session?.let(::sendOnlineShot)
+        val s = session
+        if (s != null) {
+            shotTuning = CarromPhysicsEngine.PhysicsTuning.STANDARD
+            launchStriker(activeStrikerConfig().powerMultiplier)
+            sendOnlineShot(s)
+            return
+        }
+        val face = state.dice?.face
+        shotTuning = Powers.shotTuning(tableTuning, shooterStriker(state).ability.takeIf { state.powersActive } ?: StrikerAbility.BALANCED, face)
+        launchStriker(shotPowerMultiplier(state))
     }
 
     /** Fires the striker with the current aim; shared by local shots and replayed online shots. */
     private fun launchStriker(powerMultiplier: Float) {
         val striker = _striker.value ?: return
-        val bottom = _gameState.value.isBottomTurn
-        if (BoardGeometry.isOverBaselineCircle(striker.x, striker.y, bottom)) {
+        val seat = _gameState.value.currentSeat
+        if (BoardGeometry.isOverBaselineCircle(striker.x, striker.y, seat)) {
             // Auto-nudge off the foul circle to the nearest legal spot (the server does the same).
-            val safe = if (striker.x < BoardGeometry.CENTER) 0.12f else 0.88f
-            val pos = BoardGeometry.getBaselineStrikerPos(safe, bottom)
+            val safe = if (_gameState.value.strikerBaselineOffset < 0.5f) 0.12f else 0.88f
+            val pos = BoardGeometry.strikerPos(safe, seat)
             striker.x = pos.x
             striker.y = pos.y
             _gameState.update { it.copy(strikerBaselineOffset = safe) }
@@ -423,7 +572,8 @@ class CarromViewModel @JvmOverloads constructor(
         _gameState.update {
             it.copy(
                 turnState = TurnState.MOVING,
-                turnClock = null,
+                turnClock = if (it.mode == GameMode.TIME_ATTACK) it.turnClock else null,
+                shotsPlayed = it.shotsPlayed + 1,
                 trickShot = it.trickShot?.let { t -> t.copy(shotsTaken = t.shotsTaken + 1) }
             )
         }
@@ -436,15 +586,31 @@ class CarromViewModel @JvmOverloads constructor(
         _aimPreview.value = if (striker != null && !striker.isPocketed && !state.isGameOver &&
             state.turnState != TurnState.MOVING
         ) {
-            val config = activeStrikerConfig()
-            CarromPhysicsEngine.calculateTrajectory(
-                striker = striker,
-                aimAngle = state.strikerAimAngle,
-                power = state.strikerPower,
-                pieces = _pieces.value,
-                powerMultiplier = config.powerMultiplier,
-                maxLength = CarromPhysicsEngine.DEFAULT_GUIDE_LENGTH * config.aimGuideLength
-            )
+            if (session != null) {
+                val config = activeStrikerConfig()
+                CarromPhysicsEngine.calculateTrajectory(
+                    striker = striker,
+                    aimAngle = state.strikerAimAngle,
+                    power = state.strikerPower,
+                    pieces = _pieces.value,
+                    powerMultiplier = config.powerMultiplier,
+                    maxLength = CarromPhysicsEngine.DEFAULT_GUIDE_LENGTH * config.aimGuideLength
+                )
+            } else {
+                val config = shooterStriker(state)
+                val ability = if (state.powersActive) config.ability else StrikerAbility.BALANCED
+                val face = state.dice?.face
+                CarromPhysicsEngine.calculateTrajectory(
+                    striker = striker,
+                    aimAngle = state.strikerAimAngle,
+                    power = state.strikerPower,
+                    pieces = _pieces.value,
+                    maxBounces = Powers.guideBounces(ability, face),
+                    powerMultiplier = shotPowerMultiplier(state),
+                    maxLength = Powers.guideLength(if (state.powersActive) config else standardStriker(), face),
+                    tuning = Powers.shotTuning(tableTuning, ability, face)
+                )
+            }
         } else {
             null
         }
@@ -456,6 +622,76 @@ class CarromViewModel @JvmOverloads constructor(
         return _strikers.value.find { it.id == id } ?: _strikers.value.first()
     }
 
+    private fun standardStriker(): StrikerConfig = _strikers.value.first()
+
+    /** People shoot with their equipped striker; bots always use the standard one. */
+    private fun shooterStriker(state: GameState, slot: PlayerSlot = state.currentTurn): StrikerConfig =
+        if (state.player(slot).isBot) standardStriker() else activeStrikerConfig()
+
+    /** Strike power multiplier: the striker's (only with powers on, except its catalogue power) and the die's. */
+    private fun shotPowerMultiplier(state: GameState): Float {
+        val striker = shooterStriker(state)
+        val base = when {
+            state.mode == GameMode.TRICK_SHOTS || state.mode == GameMode.LUCKY_SHOT -> standardStriker()
+            state.powersActive -> striker
+            else -> standardStriker()
+        }
+        return Powers.powerMultiplier(base, state.dice?.face)
+    }
+
+    private fun strikerMassFor(state: GameState, slot: PlayerSlot): Float =
+        if (state.powersActive) Powers.strikerMass(shooterStriker(state, slot)) else BoardGeometry.STRIKER_MASS
+
+    private fun equippedCoinSet(): CoinSet =
+        _coinSets.value.find { it.id == _gameState.value.selectedCoinSetId } ?: _coinSets.value.first()
+
+    private fun equippedDice(): DiceSkin =
+        _dice.value.find { it.id == _gameState.value.selectedDiceId } ?: _dice.value.first()
+
+    private fun activeBoardTheme(): BoardTheme =
+        _boards.value.find { it.id == _gameState.value.selectedBoardId } ?: _boards.value.first()
+
+    // endregion
+
+    // region Dice Carrom
+
+    /**
+     * Rolls the die for the current shooter. People roll with the die they equipped (its power
+     * applies when powers are on); bots roll a fair die, then plan their shot around the face.
+     */
+    fun rollDice(forBot: Boolean = false) {
+        val state = _gameState.value
+        val dice = state.dice ?: return
+        if (state.isGameOver || dice.rolling || state.turnState == TurnState.MOVING) return
+        if (state.isAiTurn != forBot) return
+        val reroll = dice.face != null
+        if (reroll && (forBot || dice.rerollsLeft <= 0)) return
+
+        val power = if (!forBot && state.powersActive) equippedDice().power else DicePower.FAIR
+        _gameState.update {
+            it.copy(dice = it.dice?.copy(rolling = true, rerollsLeft = it.dice.rerollsLeft - if (reroll) 1 else 0))
+        }
+        sound.playClick()
+        haptic.vibrateTick()
+        diceJob?.cancel()
+        diceJob = viewModelScope.launch {
+            delay(if (forBot) BOT_ROLL_DELAY_MILLIS + DICE_ROLL_MILLIS else DICE_ROLL_MILLIS)
+            val face = Powers.roll(power, random)
+            _gameState.update { it.copy(dice = it.dice?.copy(face = face, rolling = false, rollId = it.dice.rollId + 1)) }
+            haptic.vibrateStrike()
+            val multiplier = Powers.scoreMultiplier(face, power)
+            showToast(
+                if (face == DiceFace.DOUBLE && multiplier > 2) "Golden Double! Points ×$multiplier"
+                else "${face.title}: ${face.summary}"
+            )
+            refreshAimPreview()
+            if (_gameState.value.isAiTurn) {
+                delay(BOT_READ_FACE_MILLIS)
+                if (_gameState.value.isAiTurn && _gameState.value.turnState != TurnState.MOVING) scheduleAIShot()
+            }
+        }
+    }
+
     // endregion
 
     // region Turn evaluation
@@ -464,6 +700,8 @@ class CarromViewModel @JvmOverloads constructor(
         when (_gameState.value.mode) {
             GameMode.ONLINE -> return finishOnlineShot()
             GameMode.LUCKY_SHOT -> return finishLuckyShot()
+            GameMode.TIME_ATTACK -> return finishTimeAttackShot()
+            GameMode.DISC_POOL -> return finishDiscPoolShot()
             else -> Unit
         }
         val state = _gameState.value
@@ -472,11 +710,15 @@ class CarromViewModel @JvmOverloads constructor(
         val pocketedDiscs = pocketedThisShot.filter { it.type != PieceType.STRIKER }
         pocketedThisShot.clear()
 
+        val face = state.dice?.face
+        val diePower = if (!state.player(shooter).isBot && state.powersActive) equippedDice().power else DicePower.FAIR
         val outcome = CarromRules.evaluateShot(
             shooter = shooter,
             pocketed = pocketedDiscs.map { it.type },
             strikerPocketed = strikerPocketed,
-            queen = QueenStatus(state.queenPottedBy, state.queenNeedsCover, state.queenCovered)
+            queen = QueenStatus(state.queenPottedBy, state.queenNeedsCover, state.queenCovered),
+            scoreMultiplier = Powers.scoreMultiplier(face, diePower),
+            bonusTurn = face == DiceFace.BONUS_TURN
         )
 
         if (outcome.returnQueenToCenter) respotQueen()
@@ -484,14 +726,14 @@ class CarromViewModel @JvmOverloads constructor(
         recordCareerStats(shooter, pocketedDiscs.size, outcome.queenCoveredNow)
 
         _gameState.update {
-            val scored = it.player(shooter).let { p ->
+            val p = it.player(shooter)
+            it.withPlayer(
+                shooter,
                 p.copy(
                     score = (p.score + outcome.scoreDelta).coerceAtLeast(0),
                     fouls = p.fouls + if (outcome.isFoul) 1 else 0
                 )
-            }
-            val withScore = if (shooter == PlayerSlot.PLAYER1) it.copy(player1 = scored) else it.copy(player2 = scored)
-            withScore.copy(
+            ).copy(
                 queenPottedBy = outcome.queen.pottedBy,
                 queenNeedsCover = outcome.queen.awaitingCover,
                 queenCovered = outcome.queen.covered
@@ -508,17 +750,177 @@ class CarromViewModel @JvmOverloads constructor(
         val winner = CarromRules.winnerOrNull(
             mode = updated.mode,
             discsLeft = _pieces.value.count { !it.isPocketed },
-            player1Score = updated.player1.score,
-            player2Score = updated.player2.score
+            scores = updated.players.map { it.score },
+            teams = if (updated.isDoubles) updated.players.map { it.team } else null
         )
-        if (winner != null) {
-            _gameState.update { it.copy(isGameOver = true, winner = winner) }
-            _aimPreview.value = null
-            handleGameEnd(winner == PlayerSlot.PLAYER1)
-            return
-        }
+        if (winner != null) return declareWinner(winner)
 
-        startTurn(CarromRules.nextShooter(updated.mode, shooter, outcome.keepsTurn))
+        startTurn(CarromRules.nextShooter(updated.mode, shooter, outcome.keepsTurn, updated.playerCount))
+    }
+
+    private fun declareWinner(winner: PlayerSlot) {
+        _gameState.update { it.copy(isGameOver = true, winner = winner, turnClock = null) }
+        _aimPreview.value = null
+        val state = _gameState.value
+        val p1Won = winner == PlayerSlot.PLAYER1 ||
+            (state.isDoubles && state.player(winner).team == state.player1.team)
+        handleGameEnd(p1Won)
+    }
+
+    /** Disc Pool: each side pockets its own colour; see [DiscPoolRules]. */
+    private fun finishDiscPoolShot() {
+        val state = _gameState.value
+        val shooter = state.currentTurn
+        val colour = state.player(shooter).assignedColor ?: PieceType.WHITE
+        val strikerPocketed = _striker.value?.isPocketed == true
+        val pocketedDiscs = pocketedThisShot.filter { it.type != PieceType.STRIKER }
+        pocketedThisShot.clear()
+
+        val outcome = DiscPoolRules.evaluate(
+            shooter = shooter,
+            colour = colour,
+            pocketed = pocketedDiscs.map { it.type },
+            strikerPocketed = strikerPocketed,
+            queen = QueenStatus(state.queenPottedBy, state.queenNeedsCover, state.queenCovered),
+            whitesLeft = discsOnBoard(PieceType.WHITE),
+            blacksLeft = discsOnBoard(PieceType.BLACK)
+        )
+        respotDiscs(PieceType.WHITE, outcome.respotWhite, preferred = pocketedDiscs)
+        respotDiscs(PieceType.BLACK, outcome.respotBlack, preferred = pocketedDiscs)
+        if (outcome.returnQueenToCenter) respotQueen()
+        outcome.announcement?.let(::showToast)
+        recordCareerStats(shooter, pocketedDiscs.count { it.type == colour }, outcome.queenCoveredNow)
+
+        val whites = discsOnBoard(PieceType.WHITE)
+        val blacks = discsOnBoard(PieceType.BLACK)
+        _gameState.update { s ->
+            s.copy(
+                players = s.players.mapIndexed { i, p ->
+                    val left = if (p.assignedColor == PieceType.BLACK) blacks else whites
+                    p.copy(
+                        score = DiscPoolRules.DISCS_PER_COLOUR - left,
+                        fouls = p.fouls + if (outcome.isFoul && i == shooter.index) 1 else 0
+                    )
+                },
+                queenPottedBy = outcome.queen.pottedBy,
+                queenNeedsCover = outcome.queen.awaitingCover,
+                queenCovered = outcome.queen.covered
+            )
+        }
+        refreshBoardSummary()
+
+        val winningColour = DiscPoolRules.winningColour(whites, blacks, colour)
+        if (winningColour != null) {
+            val players = _gameState.value.players
+            val winner = if (colour == winningColour) shooter
+            else PlayerSlot.of(players.indexOfFirst { it.assignedColor == winningColour }.coerceAtLeast(0))
+            return declareWinner(winner)
+        }
+        startTurn(CarromRules.nextShooter(state.mode, shooter, outcome.keepsTurn, state.playerCount))
+    }
+
+    private fun discsOnBoard(type: PieceType): Int = _pieces.value.count { it.type == type && !it.isPocketed }
+
+    /** Returns [count] pocketed discs of [type] to free spots near the centre, those just pocketed first. */
+    private fun respotDiscs(type: PieceType, count: Int, preferred: List<Piece>) {
+        if (count <= 0) return
+        val pieces = _pieces.value
+        val candidates = (preferred.filter { it.type == type } + pieces.filter { it.type == type && it.isPocketed })
+            .distinct()
+            .filter { it.isPocketed }
+        for (disc in candidates.take(count)) {
+            val spot = CarromPhysicsEngine.findFreeSpot(pieces, disc.radius, ignore = disc)
+            disc.isPocketed = false
+            disc.pocketProgress = 1f
+            disc.pocketId = -1
+            disc.x = spot.x
+            disc.y = spot.y
+            disc.vx = 0f
+            disc.vy = 0f
+        }
+    }
+
+    /** Time Attack: bank the points, dock time for fouls, end on a clear board or at the buzzer. */
+    private fun finishTimeAttackShot() {
+        val state = _gameState.value
+        val status = state.timeAttack ?: return
+        val strikerPocketed = _striker.value?.isPocketed == true
+        val pocketedDiscs = pocketedThisShot.filter { it.type != PieceType.STRIKER }
+        pocketedThisShot.clear()
+        val points = pocketedDiscs.sumOf { if (it.type == PieceType.QUEEN) TIME_ATTACK_QUEEN_POINTS else PieceFactory.pointsForType(it.type) }
+        recordCareerStats(PlayerSlot.PLAYER1, pocketedDiscs.size, queenCovered = false)
+
+        var deadline = status.deadlineMillis
+        if (strikerPocketed) {
+            deadline -= TIME_ATTACK_FOUL_MILLIS
+            showToast("Foul! −${TIME_ATTACK_FOUL_MILLIS / 1000}s")
+        } else if (points > 0) {
+            showToast("+$points")
+        }
+        val p = state.player1
+        _gameState.update {
+            it.withPlayer(PlayerSlot.PLAYER1, p.copy(score = p.score + points, fouls = p.fouls + if (strikerPocketed) 1 else 0)).copy(
+                timeAttack = status.copy(deadlineMillis = deadline, pocketed = status.pocketed + pocketedDiscs.size),
+                turnClock = TurnClock(deadline, status.totalSeconds)
+            )
+        }
+        refreshBoardSummary()
+
+        val cleared = _pieces.value.none { !it.isPocketed }
+        val remaining = deadline - clock()
+        when {
+            cleared -> {
+                val bonus = (remaining.coerceAtLeast(0L) / 1000L).toInt() * TIME_ATTACK_BONUS_PER_SECOND
+                if (bonus > 0) {
+                    _gameState.update { it.withPlayer(PlayerSlot.PLAYER1, it.player1.copy(score = it.player1.score + bonus)) }
+                    showToast("Board cleared! Time bonus +$bonus")
+                }
+                endTimeAttack()
+            }
+            remaining <= 0L -> endTimeAttack()
+            else -> {
+                if (strikerPocketed) armTimeAttackClock()
+                startTurn(PlayerSlot.PLAYER1, offset = state.strikerBaselineOffset, power = state.strikerPower)
+            }
+        }
+    }
+
+    /** Ends the run when the clock runs out, or right after the shot still rolling at the buzzer. */
+    private fun armTimeAttackClock() {
+        timeAttackJob?.cancel()
+        val deadline = _gameState.value.timeAttack?.deadlineMillis ?: return
+        timeAttackJob = viewModelScope.launch {
+            delay((deadline - clock()).coerceAtLeast(0L))
+            val state = _gameState.value
+            if (state.mode != GameMode.TIME_ATTACK || state.isGameOver) return@launch
+            if (state.turnState != TurnState.MOVING) endTimeAttack()
+        }
+    }
+
+    private fun endTimeAttack() {
+        timeAttackJob?.cancel()
+        val state = _gameState.value
+        val status = state.timeAttack ?: return
+        val score = state.player1.score
+        val record = score > status.best
+        if (record) repository.setBest(BEST_TIME_ATTACK, score)
+        _aimPreview.value = null
+        _gameState.update {
+            it.copy(
+                isGameOver = true,
+                winner = PlayerSlot.PLAYER1,
+                turnClock = null,
+                timeAttack = status.copy(best = maxOf(score, status.best))
+            )
+        }
+        if (record && score > 0) {
+            sound.playVictory()
+            showToast("New best: $score!")
+        }
+        _playerStats.update { it.copy(matchesPlayed = it.matchesPlayed + 1) }
+        val coins = score / TIME_ATTACK_POINTS_PER_COIN
+        _gameState.update { it.copy(matchCoins = coins) }
+        awardRewards(coins = coins, xp = TIME_ATTACK_XP)
     }
 
     private fun respotQueen() {
@@ -564,15 +966,20 @@ class CarromViewModel @JvmOverloads constructor(
         val state = _gameState.value
         val plan = CarromAIEngine.calculateBestShot(
             pieces = _pieces.value,
-            aiColor = state.player2.assignedColor,
+            aiColor = state.player(state.currentTurn).assignedColor,
             queenNeedsCover = state.queenNeedsCover,
-            queenPottedByAI = state.queenPottedBy == PlayerSlot.PLAYER2,
-            difficulty = state.aiDifficulty
+            queenPottedByAI = state.queenPottedBy == state.currentTurn,
+            difficulty = state.aiDifficulty,
+            seat = state.currentSeat,
+            random = random
         )
+        // The plan assumes a standard strike; a Power Surge roll would overshoot, so the bot eases off.
+        val power = (plan.power / shotPowerMultiplier(state)).coerceIn(BoardGeometry.MIN_POWER, BoardGeometry.MAX_POWER)
         aiDirector.begin(
             from = ShotAim(state.strikerBaselineOffset, state.strikerAimAngle, state.strikerPower),
-            to = ShotAim(plan.baselineFraction, plan.aimAngle, plan.power)
+            to = ShotAim(plan.baselineFraction, plan.aimAngle, power)
         )
+        requestFrames()
     }
 
     private fun advanceAi(dtSeconds: Float) {
@@ -591,7 +998,7 @@ class CarromViewModel @JvmOverloads constructor(
     /** Blitz: the human gets [BLITZ_SHOT_MILLIS] per shot; the bot keeps its own pace. */
     private fun startShotClock(slot: PlayerSlot) {
         turnJob?.cancel()
-        if (slot != PlayerSlot.PLAYER1) {
+        if (_gameState.value.player(slot).isBot) {
             _gameState.update { it.copy(turnClock = null) }
             return
         }
@@ -599,12 +1006,12 @@ class CarromViewModel @JvmOverloads constructor(
         turnJob = viewModelScope.launch {
             delay(BLITZ_SHOT_MILLIS)
             val state = _gameState.value
-            if (state.mode != GameMode.BLITZ || state.isGameOver || state.currentTurn != PlayerSlot.PLAYER1 ||
+            if (state.mode != GameMode.BLITZ || state.isGameOver || state.currentTurn != slot ||
                 state.turnState == TurnState.MOVING
             ) return@launch
             haptic.vibrateStrike()
             showToast("Shot clock! The turn passes")
-            startTurn(PlayerSlot.PLAYER2)
+            startTurn(slot.next(state.playerCount))
         }
     }
 
@@ -628,6 +1035,7 @@ class CarromViewModel @JvmOverloads constructor(
                     }
                 }
                 if (firstClear) _playerStats.update { it.copy(trickShotsCompleted = it.trickShotsCompleted + 1) }
+                _gameState.update { it.copy(matchCoins = TRICK_SHOT_REWARD_COINS) }
                 awardRewards(coins = TRICK_SHOT_REWARD_COINS, xp = 50)
                 sound.playVictory()
                 showToast("Trick shot solved! +$TRICK_SHOT_REWARD_COINS coins")
@@ -694,7 +1102,9 @@ class CarromViewModel @JvmOverloads constructor(
         }
         if (isPlayer1Win) {
             sound.playVictory()
-            awardRewards(coins = MATCH_WIN_COINS, xp = MATCH_WIN_XP)
+            val coins = (MATCH_WIN_COINS * Powers.winCoinMultiplier(matchCoinPower)).toInt()
+            _gameState.update { it.copy(matchCoins = coins) }
+            awardRewards(coins = coins, xp = MATCH_WIN_XP)
         } else {
             repository.savePlayerStats(_playerStats.value)
         }
@@ -712,6 +1122,10 @@ class CarromViewModel @JvmOverloads constructor(
         if (session?.matchId == snapshot.id) return onMatchUpdate(MatchUpdate.Sync(snapshot))
 
         val view = SeatView(seat)
+        tableTuning = CarromPhysicsEngine.PhysicsTuning.STANDARD
+        shotTuning = tableTuning
+        matchCoinPower = CoinPower.BALANCED
+        lastConfig = null
         resetBoard(view.piecesOf(snapshot))
         val mine = snapshot.seats[seat]
         val theirs = snapshot.seats[1 - seat]
@@ -811,6 +1225,7 @@ class CarromViewModel @JvmOverloads constructor(
         s.remoteAim = null
         s.replaying = shot
         _striker.value = PieceFactory.createStriker(offset, isBottom = slot == PlayerSlot.PLAYER1)
+        shotTuning = CarromPhysicsEngine.PhysicsTuning.STANDARD
         _gameState.update {
             it.copy(currentTurn = slot, strikerBaselineOffset = offset, strikerAimAngle = aim.angle, strikerPower = aim.power)
         }
@@ -897,8 +1312,10 @@ class CarromViewModel @JvmOverloads constructor(
         val theirs = snapshot.seats[1 - s.view.mySeat]
         _gameState.update {
             it.copy(
-                player1 = PlayerData(mine.name, SeatView.monogram(mine.name), mine.score, fouls = mine.fouls),
-                player2 = PlayerData(theirs.name, SeatView.monogram(theirs.name), theirs.score, fouls = theirs.fouls),
+                players = listOf(
+                    PlayerData(mine.name, SeatView.monogram(mine.name), mine.score, fouls = mine.fouls),
+                    PlayerData(theirs.name, SeatView.monogram(theirs.name), theirs.score, fouls = theirs.fouls)
+                ),
                 queenPottedBy = snapshot.queen.pottedBy?.let(s.view::slotOf),
                 queenNeedsCover = snapshot.queen.awaitingCover,
                 queenCovered = snapshot.queen.covered,
@@ -1166,6 +1583,43 @@ class CarromViewModel @JvmOverloads constructor(
         _gameState.update { it.copy(selectedBoardId = id) }
     }
 
+    fun buyCoinSet(set: CoinSet) {
+        if (!spendCoins(set.price, set.id, set.isUnlocked)) return
+        _coinSets.update { list -> list.map { if (it.id == set.id) it.copy(isUnlocked = true) else it } }
+        selectCoinSet(set.id)
+        showToast("Unlocked ${set.name}")
+    }
+
+    fun buyDice(die: DiceSkin) {
+        if (!spendCoins(die.price, die.id, die.isUnlocked)) return
+        _dice.update { list -> list.map { if (it.id == die.id) it.copy(isUnlocked = true) else it } }
+        selectDice(die.id)
+        showToast("Unlocked ${die.name}")
+    }
+
+    /** Coin sets change the discs' size and weight, so a new set lands with the next rack. */
+    fun selectCoinSet(id: String) {
+        if (_coinSets.value.none { it.id == id && it.isUnlocked }) return
+        repository.setSelection(SELECTION_COINS, id)
+        _gameState.update { it.copy(selectedCoinSetId = id) }
+    }
+
+    fun selectDice(id: String) {
+        if (_dice.value.none { it.id == id && it.isUnlocked }) return
+        repository.setSelection(SELECTION_DICE, id)
+        _gameState.update { it.copy(selectedDiceId = id) }
+    }
+
+    /** Loadout powers on or off for offline matches; takes effect from the next match. */
+    fun togglePowers() {
+        val next = !_gameState.value.powersEnabled
+        repository.setFlag(FLAG_POWERS, next)
+        _gameState.update { it.copy(powersEnabled = next) }
+    }
+
+    /** The best Time Attack score so far. */
+    fun timeAttackBest(): Int = repository.getBest(BEST_TIME_ATTACK)
+
     fun toggleSound() {
         val next = !_gameState.value.soundEnabled
         sound.isSoundEnabled = next
@@ -1252,5 +1706,27 @@ class CarromViewModel @JvmOverloads constructor(
         const val AIM_FOLLOW_RATE = 16f
         const val NO_TURN = -1
         const val PHASE_PLAYING = "playing"
+        const val DICE_ROLL_MILLIS = 900L
+        const val BOT_ROLL_DELAY_MILLIS = 450L
+        const val BOT_READ_FACE_MILLIS = 500L
+        const val TIME_ATTACK_MILLIS = 90_000L
+        const val TIME_ATTACK_FOUL_MILLIS = 5_000L
+        const val TIME_ATTACK_QUEEN_POINTS = 50
+        const val TIME_ATTACK_BONUS_PER_SECOND = 2
+        const val TIME_ATTACK_POINTS_PER_COIN = 2
+        const val TIME_ATTACK_XP = 30
+        const val SELECTION_COINS = "coins"
+        const val SELECTION_DICE = "dice"
+        const val FLAG_POWERS = "powers"
+        const val BEST_TIME_ATTACK = "time_attack"
+        const val DEFAULT_COIN_SET = "heritage_boxwood"
+        const val DEFAULT_DICE = "ivory_die"
+        val BOT_NAMES = listOf("Bot Master", "Bot Ace", "Bot Rio", "Bot Zen")
+
+        /** Offline modes where loadout powers apply (when the player has them switched on). */
+        val POWER_MODES = setOf(
+            GameMode.VS_AI, GameMode.CLASSIC, GameMode.DISC_POOL, GameMode.FREESTYLE, GameMode.PASS_AND_PLAY,
+            GameMode.PRACTICE, GameMode.BLITZ, GameMode.DICE, GameMode.TIME_ATTACK
+        )
     }
 }

@@ -1,6 +1,7 @@
 package com.example.royalcarromclassic.engine
 
 import com.example.royalcarromclassic.data.Pocket
+import com.example.royalcarromclassic.data.Seat
 import com.example.royalcarromclassic.data.Vector2D
 import kotlin.math.hypot
 
@@ -59,25 +60,71 @@ object BoardGeometry {
         Pocket(id = 3, x = PLAYABLE_MIN + 18f, y = PLAYABLE_MAX - 18f, radius = POCKET_RADIUS, name = "Bottom-Left")
     )
 
-    fun getBaselineStrikerPos(fraction: Float, isBottomPlayer: Boolean = true): Vector2D {
-        val clamped = fraction.coerceIn(0f, 1f)
-        val x = BASELINE_START_X + clamped * BASELINE_WIDTH
-        val y = if (isBottomPlayer) BASELINE_BOTTOM_Y else BASELINE_TOP_Y
-        return Vector2D(x, y)
+    fun getBaselineStrikerPos(fraction: Float, isBottomPlayer: Boolean = true): Vector2D =
+        strikerPos(fraction, if (isBottomPlayer) Seat.BOTTOM else Seat.TOP)
+
+    /**
+     * The striker's centre at [fraction] along [seat]'s baseline. Fractions run left → right on
+     * screen for the bottom and top seats, and top → bottom for the side seats.
+     */
+    fun strikerPos(fraction: Float, seat: Seat): Vector2D {
+        val along = BASELINE_START_X + fraction.coerceIn(0f, 1f) * BASELINE_WIDTH
+        return when (seat) {
+            Seat.BOTTOM -> Vector2D(along, BASELINE_BOTTOM_Y)
+            Seat.TOP -> Vector2D(along, BASELINE_TOP_Y)
+            Seat.LEFT -> Vector2D(BASELINE_LEFT_X, along)
+            Seat.RIGHT -> Vector2D(BASELINE_RIGHT_X, along)
+        }
     }
 
     /** Converts a board x-coordinate on a horizontal baseline to a clamped placement fraction. */
     fun baselineFractionAt(x: Float): Float =
         ((x - BASELINE_START_X) / BASELINE_WIDTH).coerceIn(MIN_BASELINE_FRACTION, MAX_BASELINE_FRACTION)
 
+    /** The clamped placement fraction on [seat]'s baseline nearest the board point ([x], [y]). */
+    fun baselineFractionAt(x: Float, y: Float, seat: Seat): Float = baselineFractionAt(if (seat.horizontal) x else y)
+
     /** Straight-ahead aim for the player shooting from the given side. */
     fun forwardAngle(isBottomPlayer: Boolean): Float = if (isBottomPlayer) -HALF_PI else HALF_PI
 
-    fun isOverBaselineCircle(x: Float, y: Float, isBottomPlayer: Boolean = true): Boolean {
-        val baselineY = if (isBottomPlayer) BASELINE_BOTTOM_Y else BASELINE_TOP_Y
-        val distLeft = hypot(x - BASELINE_START_X, y - baselineY)
-        val distRight = hypot(x - BASELINE_END_X, y - baselineY)
-        return distLeft <= BASELINE_CIRCLE_RADIUS + 4f || distRight <= BASELINE_CIRCLE_RADIUS + 4f
+    /** Straight-ahead aim (towards the far side) for [seat]. */
+    fun forwardAngle(seat: Seat): Float = when (seat) {
+        Seat.BOTTOM -> -HALF_PI
+        Seat.TOP -> HALF_PI
+        Seat.LEFT -> 0f
+        Seat.RIGHT -> PI_F
+    }
+
+    fun isOverBaselineCircle(x: Float, y: Float, isBottomPlayer: Boolean = true): Boolean =
+        isOverBaselineCircle(x, y, if (isBottomPlayer) Seat.BOTTOM else Seat.TOP)
+
+    /** True when ([x], [y]) sits on one of the two red foul circles that end [seat]'s baseline. */
+    fun isOverBaselineCircle(x: Float, y: Float, seat: Seat): Boolean {
+        val a = strikerPos(0f, seat)
+        val b = strikerPos(1f, seat)
+        val limit = BASELINE_CIRCLE_RADIUS + 4f
+        return hypot(x - a.x, y - a.y) <= limit || hypot(x - b.x, y - b.y) <= limit
+    }
+
+    /**
+     * The rotation (radians, about the board centre) that carries [seat]'s baseline onto the top
+     * baseline. Lets seat-agnostic logic (the bot) reason as if it always sat at the top.
+     */
+    fun rotationToTop(seat: Seat): Float = when (seat) {
+        Seat.TOP -> 0f
+        Seat.BOTTOM -> PI_F
+        Seat.LEFT -> HALF_PI
+        Seat.RIGHT -> -HALF_PI
+    }
+
+    /** Rotates the board point ([x], [y]) by [angle] radians about the centre. */
+    fun rotateAboutCenter(x: Float, y: Float, angle: Float): Vector2D {
+        if (angle == 0f) return Vector2D(x, y)
+        val c = kotlin.math.cos(angle)
+        val s = kotlin.math.sin(angle)
+        val dx = x - CENTER
+        val dy = y - CENTER
+        return Vector2D(CENTER + dx * c - dy * s, CENTER + dx * s + dy * c)
     }
 
     /** Wraps an angle into (-π, π]. */

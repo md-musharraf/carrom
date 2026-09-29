@@ -30,7 +30,7 @@ private const val DIAGONAL = 0.70710677f
  * Pre-built geometry and brushes for the static board layer, in board units.
  * Built once per theme; the grain is seeded from the theme id so it never shimmers or shifts.
  */
-class BoardArt(val theme: BoardTheme) {
+class BoardArt(val theme: BoardTheme, val pocketScale: Float = 1f) {
 
     /** One mitred frame plank: its outline, lengthwise wood grain and lighting. */
     class Plank(val shape: Path, val fill: Brush, val darkGrain: Path, val lightGrain: Path, val shade: Float)
@@ -197,7 +197,7 @@ class BoardArt(val theme: BoardTheme) {
                 0.62f to Color(0xFF070403),
                 1f to Color(0xFF2A1B12),
                 center = Offset(p.x - 6f, p.y - 6f),
-                radius = BoardGeometry.POCKET_RADIUS + 4f
+                radius = BoardGeometry.POCKET_RADIUS * pocketScale + 4f
             )
         }
     }
@@ -340,9 +340,11 @@ private fun DrawScope.drawPockets(art: BoardArt) {
     val recess = lerp(art.theme.woodColor, Color.Black, 0.55f)
     BoardGeometry.POCKETS.forEachIndexed { i, pocket ->
         val c = Offset(pocket.x, pocket.y)
-        drawCircle(recess, pocket.radius + 7f, c)
-        drawCircle(art.pocketRims[i], pocket.radius + 3f, c, style = art.rimStroke)
-        drawCircle(art.pocketHoles[i], pocket.radius, c)
-        drawCircle(Color.Black, pocket.radius + 0.8f, c, alpha = 0.6f, style = art.lipStroke)
+        // Wide-pocket boards really are cut wider, so the power is visible at a glance.
+        val r = pocket.radius * art.pocketScale
+        drawCircle(recess, r + 7f, c)
+        drawCircle(art.pocketRims[i], r + 3f, c, style = art.rimStroke)
+        drawCircle(art.pocketHoles[i], r, c)
+        drawCircle(Color.Black, r + 0.8f, c, alpha = 0.6f, style = art.lipStroke)
     }
 }

@@ -125,4 +125,26 @@ class PreferencesManager(context: Context) : GameRepository {
             .putInt("daily_${counter}_count", count.coerceAtLeast(0))
             .apply()
     }
+
+    override fun getSelection(category: String, default: String): String =
+        prefs.getString("selected_$category", default) ?: default
+
+    override fun setSelection(category: String, id: String) {
+        if (category.isBlank() || id.isBlank()) return
+        prefs.edit().putString("selected_$category", id).apply()
+    }
+
+    override fun getFlag(key: String, default: Boolean): Boolean = prefs.getBoolean("flag_$key", default)
+
+    override fun setFlag(key: String, value: Boolean) {
+        if (key.isBlank()) return
+        prefs.edit().putBoolean("flag_$key", value).apply()
+    }
+
+    override fun getBest(key: String): Int = prefs.getInt("best_$key", 0).coerceAtLeast(0)
+
+    override fun setBest(key: String, value: Int) {
+        if (key.isBlank()) return
+        prefs.edit().putInt("best_$key", value.coerceIn(0, 999_999)).apply()
+    }
 }

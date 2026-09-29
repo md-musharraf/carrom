@@ -36,30 +36,58 @@ private data class Verdict(
     val coins: Int,
     val xp: Int,
     val primary: String = "Play again",
-    val secondary: String = "Change mode",
+    /** Label of the second button, or null to show only the first. */
+    val secondary: String? = "Home",
     /** Rating points gained or lost (ranked online matches only). */
     val ratingChange: Int? = null
 )
 
 private fun verdictFor(state: GameState): Verdict {
-    val p1Won = state.winner == PlayerSlot.PLAYER1
+    val p1Won = state.winner == PlayerSlot.PLAYER1 ||
+        (state.isDoubles && state.winner != null && state.player(state.winner).team == state.player1.team)
+    val coins = state.matchCoins
+    val xp = if (coins > 0) 100 else 0
     return when (state.mode) {
         GameMode.TRICK_SHOTS ->
-            if (p1Won) Verdict("Solved!", "A masterful trick shot", true, 300, 50)
-            else Verdict("Out of Shots", "Study the guide and try again", false, 0, 0, primary = "Try again")
+            if (p1Won) Verdict("Solved!", "A masterful trick shot", true, coins, 50)
+            else Verdict("Out of Shots", "Study the guide and try again", false, 0, 0, primary = "Try again", secondary = "Home")
         GameMode.VS_AI ->
-            if (p1Won) Verdict("Victory", "You bested the Bot Master", true, 500, 100)
-            else Verdict("Defeat", "The bot takes this one — a rematch?", false, 0, 0)
+            if (p1Won) Verdict("Victory", "You bested ${state.player2.name}", true, coins, xp, secondary = "Home")
+            else Verdict("Defeat", "The bot takes this one — a rematch?", false, 0, 0, secondary = "Home")
         GameMode.BLITZ ->
-            if (p1Won) Verdict("Blitz Champion", "Quick hands and a steady eye", true, 500, 100)
-            else Verdict("Out-paced", "The bot was quicker this time", false, 0, 0)
+            if (p1Won) Verdict("Blitz Champion", "Quick hands and a steady eye", true, coins, xp, secondary = "Home")
+            else Verdict("Out-paced", "The bot was quicker this time", false, 0, 0, secondary = "Home")
         GameMode.LUCKY_SHOT -> Verdict(
             "Lucky Shot", "You won ${state.luckyShot?.coinsWon ?: 0} coins today. New shots at midnight.", true,
-            coins = state.luckyShot?.coinsWon ?: 0, xp = 0, primary = "Back to the table"
+            coins = state.luckyShot?.coinsWon ?: 0, xp = 0, primary = "Back home", secondary = null
         )
+        GameMode.TIME_ATTACK -> {
+            val score = state.player1.score
+            val best = state.timeAttack?.best ?: score
+            Verdict(
+                title = if (score > 0 && score >= best) "New Best!" else "Time!",
+                subtitle = "You scored $score · best $best",
+                triumphant = score > 0 && score >= best,
+                coins = coins,
+                xp = if (state.isGameOver) 30 else 0,
+                primary = "Go again",
+                secondary = "Home"
+            )
+        }
         GameMode.ONLINE -> onlineVerdict(state)
-        GameMode.PRACTICE -> Verdict("Board Cleared", "Practice makes perfect", true, 500, 100)
-        else -> Verdict("${winnerName(state)} Wins", "A fine game of carrom", true, if (p1Won) 500 else 0, if (p1Won) 100 else 0)
+        GameMode.PRACTICE -> Verdict("Board Cleared", "Practice makes perfect", true, coins, xp, secondary = "Home")
+        else -> {
+            val title = when {
+                state.isDoubles -> "Team ${if (state.player(state.winner ?: PlayerSlot.PLAYER1).team == 0) "Gold" else "Silver"} Wins"
+                else -> "${winnerName(state)} Wins"
+            }
+            val subtitle = when (state.mode) {
+                GameMode.DISC_POOL -> "Every disc of their colour pocketed"
+                GameMode.DICE -> "The dice were kind, the aim was true"
+                else -> "A fine game of carrom"
+            }
+            Verdict(title, subtitle, true, coins, xp, secondary = "Home")
+        }
     }
 }
 
@@ -97,7 +125,7 @@ fun GameOverDialog(
     onNextTrickShot: (Int) -> Unit,
     onChangeMode: () -> Unit
 ) {
-    val verdict = remember(gameState.mode, gameState.winner, gameState.player1.name, gameState.player2.name, gameState.online?.result) {
+    val verdict = remember(gameState.mode, gameState.winner, gameState.players, gameState.online?.result, gameState.matchCoins, gameState.timeAttack) {
         verdictFor(gameState)
     }
 
@@ -154,17 +182,32 @@ fun GameOverDialog(
                     Text(verdict.subtitle, style = MaterialTheme.typography.bodyMedium, color = CarromPalette.Parchment, textAlign = TextAlign.Center)
                 }
 
-                if (gameState.mode != GameMode.TRICK_SHOTS && gameState.mode != GameMode.LUCKY_SHOT) {
-                    Row(
+                val solo = gameState.mode == GameMode.TRICK_SHOTS || gameState.mode == GameMode.LUCKY_SHOT ||
+                    gameState.mode == GameMode.TIME_ATTACK || gameState.mode == GameMode.PRACTICE
+                if (!solo) {
+                    val suffix = if (gameState.mode == GameMode.DISC_POOL) "/9" else ""
+                    FlowRow(
                         Modifier
                             .fillMaxWidth()
                             .classicPanel(accentAlpha = 0.18f)
                             .padding(horizontal = 14.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        FinalScore(gameState.player1.name, gameState.player1.score, gameState.winner == PlayerSlot.PLAYER1, Modifier.weight(1f))
-                        Text("—", style = MaterialTheme.typography.titleMedium, color = CarromPalette.Muted)
-                        FinalScore(gameState.player2.name, gameState.player2.score, gameState.winner == PlayerSlot.PLAYER2, Modifier.weight(1f))
+                        gameState.players.forEachIndexed { i, player ->
+                            val slot = PlayerSlot.of(i)
+                            val won = gameState.winner == slot ||
+                                (gameState.isDoubles && gameState.winner != null && gameState.player(gameState.winner).team == player.team)
+                            FinalScore(player.name, "${player.score}$suffix", won, Modifier.widthIn(min = 72.dp))
+                        }
+                    }
+                    if (gameState.isDoubles) {
+                        val totals = gameState.teamScores
+                        Text(
+                            "Team Gold ${totals[0]}  ·  Team Silver ${totals[1]}",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = CarromPalette.Parchment
+                        )
                     }
                 }
 
@@ -189,7 +232,7 @@ fun GameOverDialog(
                     } else {
                         ClassicButton(verdict.primary, onClick = onRematch, modifier = Modifier.fillMaxWidth())
                     }
-                    ClassicButton(verdict.secondary, onClick = onChangeMode, style = ButtonStyle.Outline, modifier = Modifier.fillMaxWidth())
+                    verdict.secondary?.let { ClassicButton(it, onClick = onChangeMode, style = ButtonStyle.Outline, modifier = Modifier.fillMaxWidth()) }
                 }
             }
         }
@@ -197,10 +240,10 @@ fun GameOverDialog(
 }
 
 @Composable
-private fun FinalScore(name: String, score: Int, isWinner: Boolean, modifier: Modifier = Modifier) {
+private fun FinalScore(name: String, score: String, isWinner: Boolean, modifier: Modifier = Modifier) {
     Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
         Text(name, style = MaterialTheme.typography.labelMedium, color = CarromPalette.Parchment, maxLines = 1)
-        Text("$score", style = MaterialTheme.typography.headlineMedium, color = if (isWinner) CarromPalette.GoldLight else CarromPalette.Ivory)
+        Text(score, style = MaterialTheme.typography.headlineMedium, color = if (isWinner) CarromPalette.GoldLight else CarromPalette.Ivory)
     }
 }
 

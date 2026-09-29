@@ -34,6 +34,27 @@ object CarromPhysicsEngine {
         val strikerPocketId: Int = -1,
     )
 
+    /**
+     * How the table plays. Board, coin, striker and dice powers adjust it for a match or a single
+     * shot; [STANDARD] is the regulation table (and the one the server simulates online).
+     */
+    data class PhysicsTuning(
+        /** Per-60 Hz-frame glide factor for carrom men (closer to 1 = glides farther). */
+        val discFriction: Float = FRICTION_BASE,
+        /** Per-60 Hz-frame glide factor for the striker. */
+        val strikerFriction: Float = FRICTION_BASE,
+        val linearDrag: Float = LINEAR_DRAG,
+        val wallRestitution: Float = RESTITUTION_WALL,
+        /** Scales how far from a pocket's centre a disc still drops, and its pull radius. */
+        val pocketScale: Float = 1f,
+        /** Strength of the pull that guides rolling carrom men over the pocket lip. */
+        val discPocketPull: Float = POCKET_PULL
+    ) {
+        companion object {
+            val STANDARD = PhysicsTuning()
+        }
+    }
+
     /** Contact callback: [intensity] is normalised to 0..1, ([x], [y]) is the contact point. */
     fun interface ContactListener {
         fun onContact(intensity: Float, x: Float, y: Float)
@@ -66,7 +87,7 @@ object CarromPhysicsEngine {
     const val LINEAR_DRAG = 0.026f
     const val VELOCITY_EPSILON = 0.06f
 
-    private const val POCKET_PULL = 0.65f
+    const val POCKET_PULL = 0.65f
     private const val STRIKER_DROP_MARGIN = 4.5f
     private const val PUCK_DROP_MARGIN = 1.5f
 
@@ -81,15 +102,21 @@ object CarromPhysicsEngine {
     private const val DEFLECT_GUIDE_LENGTH = 150f
     private const val NO_HIT = Float.MAX_VALUE
 
-    fun generateClassicCluster(): List<Piece> {
+    /** The classic 19-disc rosette; [radius] and [mass] vary with the coin set's power offline. */
+    fun generateClassicCluster(
+        radius: Float = BoardGeometry.PUCK_RADIUS,
+        mass: Float = BoardGeometry.PUCK_MASS
+    ): List<Piece> {
         val pieces = ArrayList<Piece>(19)
         val cx = BoardGeometry.CENTER
         val cy = BoardGeometry.CENTER
-        val r = BoardGeometry.PUCK_RADIUS
+        val r = radius
         val gap = 0.35f
+        fun disc(id: String, type: PieceType, x: Float, y: Float) =
+            PieceFactory.createPiece(id, type, x, y, radius = radius, mass = mass)
 
         // 1. Center Queen
-        pieces.add(PieceFactory.createPiece("queen", PieceType.QUEEN, cx, cy))
+        pieces.add(disc("queen", PieceType.QUEEN, cx, cy))
 
         // 2. Inner ring: 6 pieces (3 White, 3 Black alternating)
         val d1 = (2f * r) + gap
@@ -98,7 +125,7 @@ object CarromPhysicsEngine {
             val angle = i * angleStep6
             val type = if (i % 2 == 0) PieceType.WHITE else PieceType.BLACK
             pieces.add(
-                PieceFactory.createPiece(
+                disc(
                     id = "inner_${i}_${type.name.lowercase()}",
                     type = type,
                     x = cx + cos(angle) * d1,
@@ -116,7 +143,7 @@ object CarromPhysicsEngine {
             val cornerAngle = i * angleStep6
             val cornerType = if (i % 2 == 1) PieceType.WHITE else PieceType.BLACK
             pieces.add(
-                PieceFactory.createPiece(
+                disc(
                     id = "outer_c_${i}_${cornerType.name.lowercase()}",
                     type = cornerType,
                     x = cx + cos(cornerAngle) * dCorner,
@@ -127,7 +154,7 @@ object CarromPhysicsEngine {
             val edgeAngle = cornerAngle + halfAngleStep
             val edgeType = if (i % 2 == 0) PieceType.WHITE else PieceType.BLACK
             pieces.add(
-                PieceFactory.createPiece(
+                disc(
                     id = "outer_e_${i}_${edgeType.name.lowercase()}",
                     type = edgeType,
                     x = cx + cos(edgeAngle) * dEdge,
@@ -154,7 +181,8 @@ object CarromPhysicsEngine {
         dtSeconds: Float = 1f / 60f,
         onClack: ContactListener = NO_CONTACT,
         onWall: ContactListener = NO_CONTACT,
-        onPocket: PocketListener = NO_POCKET
+        onPocket: PocketListener = NO_POCKET,
+        tuning: PhysicsTuning = PhysicsTuning.STANDARD
     ): Boolean {
         val startNanos = PerformanceTracker.recordPhysicsTickStart()
 
@@ -163,8 +191,9 @@ object CarromPhysicsEngine {
         // exactly SUB_STEPS steps and two 120 Hz frames integrate identically to one 60 Hz frame.
         val subStepCount = ceil(frames * SUB_STEPS - SUB_STEP_EPSILON).toInt().coerceIn(1, MAX_SUB_STEPS)
         val subDt = frames / subStepCount
-        val frictionMult = FRICTION_BASE.pow(subDt)
-        val linearDecel = LINEAR_DRAG * subDt
+        val discFrictionMult = tuning.discFriction.pow(subDt)
+        val strikerFrictionMult = tuning.strikerFriction.pow(subDt)
+        val linearDecel = tuning.linearDrag * subDt
 
         val active = ArrayList<Piece>(pieces.size + 1)
         if (striker != null && !striker.isPocketed) active.add(striker)
@@ -174,8 +203,8 @@ object CarromPhysicsEngine {
         }
 
         for (step in 0 until subStepCount) {
-            integrate(active, subDt, frictionMult, linearDecel, onPocket)
-            resolveCushions(active, onWall)
+            integrate(active, subDt, discFrictionMult, strikerFrictionMult, linearDecel, tuning, onPocket)
+            resolveCushions(active, tuning.wallRestitution, onWall)
             resolveContacts(active, onClack)
         }
 
@@ -196,11 +225,15 @@ object CarromPhysicsEngine {
     private fun integrate(
         active: List<Piece>,
         subDt: Float,
-        frictionMult: Float,
+        discFrictionMult: Float,
+        strikerFrictionMult: Float,
         linearDecel: Float,
+        tuning: PhysicsTuning,
         onPocket: PocketListener
     ) {
         val pockets = BoardGeometry.POCKETS
+        val suction = BoardGeometry.POCKET_SUCTION_RADIUS * tuning.pocketScale
+        val pocketRadius = BoardGeometry.POCKET_RADIUS * tuning.pocketScale
         for (i in active.indices) {
             val p = active[i]
             if (p.isPocketed) continue
@@ -212,6 +245,7 @@ object CarromPhysicsEngine {
             val isMoving = speed > VELOCITY_EPSILON
             if (isMoving) {
                 // Exponential powder glide combined with a gentle linear surface drag.
+                val frictionMult = if (p.type == PieceType.STRIKER) strikerFrictionMult else discFrictionMult
                 val scale = frictionMult - min(speed, linearDecel) / speed
                 p.vx *= scale
                 p.vy *= scale
@@ -220,14 +254,15 @@ object CarromPhysicsEngine {
                 p.vy = 0f
             }
 
-            val dropThreshold = BoardGeometry.POCKET_RADIUS -
-                if (p.type == PieceType.STRIKER) STRIKER_DROP_MARGIN else PUCK_DROP_MARGIN
+            val isStriker = p.type == PieceType.STRIKER
+            val dropThreshold = pocketRadius - if (isStriker) STRIKER_DROP_MARGIN else PUCK_DROP_MARGIN
+            val pocketPull = if (isStriker) POCKET_PULL else tuning.discPocketPull
             for (k in pockets.indices) {
                 val pocket = pockets[k]
                 val dx = pocket.x - p.x
                 val dy = pocket.y - p.y
                 val dist = hypot(dx, dy)
-                if (dist >= BoardGeometry.POCKET_SUCTION_RADIUS) continue
+                if (dist >= suction) continue
 
                 if (dist < dropThreshold) {
                     p.isPocketed = true
@@ -241,8 +276,8 @@ object CarromPhysicsEngine {
 
                 // Only rolling discs are guided over the lip, so resting discs never creep.
                 if (isMoving && dist > 0.001f) {
-                    val ratio = 1f - dist / BoardGeometry.POCKET_SUCTION_RADIUS
-                    val pull = POCKET_PULL * ratio * ratio * subDt / dist
+                    val ratio = 1f - dist / suction
+                    val pull = pocketPull * ratio * ratio * subDt / dist
                     p.vx += dx * pull
                     p.vy += dy * pull
                 }
@@ -251,7 +286,7 @@ object CarromPhysicsEngine {
     }
 
     /** Wall (cushion) rebounds with tangential damping. */
-    private fun resolveCushions(active: List<Piece>, onWall: ContactListener) {
+    private fun resolveCushions(active: List<Piece>, restitution: Float, onWall: ContactListener) {
         for (i in active.indices) {
             val p = active[i]
             if (p.isPocketed) continue
@@ -262,24 +297,24 @@ object CarromPhysicsEngine {
 
             if (p.x < minBound) {
                 p.x = minBound
-                p.vx = -p.vx * RESTITUTION_WALL
+                p.vx = -p.vx * restitution
                 p.vy *= WALL_TANGENTIAL_FRICTION
                 impactSpeed = abs(p.vx)
             } else if (p.x > maxBound) {
                 p.x = maxBound
-                p.vx = -p.vx * RESTITUTION_WALL
+                p.vx = -p.vx * restitution
                 p.vy *= WALL_TANGENTIAL_FRICTION
                 impactSpeed = abs(p.vx)
             }
 
             if (p.y < minBound) {
                 p.y = minBound
-                p.vy = -p.vy * RESTITUTION_WALL
+                p.vy = -p.vy * restitution
                 p.vx *= WALL_TANGENTIAL_FRICTION
                 impactSpeed = maxOf(impactSpeed, abs(p.vy))
             } else if (p.y > maxBound) {
                 p.y = maxBound
-                p.vy = -p.vy * RESTITUTION_WALL
+                p.vy = -p.vy * restitution
                 p.vx *= WALL_TANGENTIAL_FRICTION
                 impactSpeed = maxOf(impactSpeed, abs(p.vy))
             }
@@ -445,7 +480,8 @@ object CarromPhysicsEngine {
         pieces: List<Piece>,
         maxBounces: Int = 2,
         powerMultiplier: Float = 1f,
-        maxLength: Float = DEFAULT_GUIDE_LENGTH
+        maxLength: Float = DEFAULT_GUIDE_LENGTH,
+        tuning: PhysicsTuning = PhysicsTuning.STANDARD
     ): TrajectoryData {
         val speed0 = (power / 100f) * MAX_STRIKE_SPEED * powerMultiplier
         var x = striker.x
@@ -455,9 +491,9 @@ object CarromPhysicsEngine {
         val r = striker.radius
         val minBound = BoardGeometry.PLAYABLE_MIN + r
         val maxBound = BoardGeometry.PLAYABLE_MAX - r
-        val stepFriction = FRICTION_BASE.pow(TRAJECTORY_STEP)
-        val stepDrag = LINEAR_DRAG * TRAJECTORY_STEP
-        val strikerDrop = BoardGeometry.POCKET_RADIUS - STRIKER_DROP_MARGIN
+        val stepFriction = tuning.strikerFriction.pow(TRAJECTORY_STEP)
+        val stepDrag = tuning.linearDrag * TRAJECTORY_STEP
+        val strikerDrop = BoardGeometry.POCKET_RADIUS * tuning.pocketScale - STRIKER_DROP_MARGIN
 
         val path = ArrayList<Vector2D>(maxBounces + 3)
         path.add(Vector2D(x, y))
@@ -502,7 +538,7 @@ object CarromPhysicsEngine {
                 x += stepX * eventT
                 y += stepY * eventT
                 path.add(Vector2D(x, y))
-                return predictContact(striker, hit, x, y, vx, vy, pieces, path)
+                return predictContact(striker, hit, x, y, vx, vy, pieces, path, tuning)
             }
             if (pocketId >= 0 && eventT <= 1f && eventT <= wallT && eventT <= lengthT) {
                 x += stepX * eventT
@@ -520,11 +556,11 @@ object CarromPhysicsEngine {
                 y += stepY * wallT
                 travelled += stepLen * wallT
                 if (x <= minBound + 0.01f || x >= maxBound - 0.01f) {
-                    vx = -vx * RESTITUTION_WALL
+                    vx = -vx * tuning.wallRestitution
                     vy *= WALL_TANGENTIAL_FRICTION
                 }
                 if (y <= minBound + 0.01f || y >= maxBound - 0.01f) {
-                    vy = -vy * RESTITUTION_WALL
+                    vy = -vy * tuning.wallRestitution
                     vx *= WALL_TANGENTIAL_FRICTION
                 }
                 x = x.coerceIn(minBound, maxBound)
@@ -558,7 +594,8 @@ object CarromPhysicsEngine {
         vx: Float,
         vy: Float,
         pieces: List<Piece>,
-        strikerPath: List<Vector2D>
+        strikerPath: List<Vector2D>,
+        tuning: PhysicsTuning
     ): TrajectoryData {
         var nx = target.x - ghostX
         var ny = target.y - ghostY
@@ -571,7 +608,8 @@ object CarromPhysicsEngine {
         val targetSpeed = (1f + RESTITUTION_STRIKER_PUCK) * striker.mass / totalMass * vn
         val targetEnd = projectDisc(
             target.x, target.y, nx, ny, targetSpeed, target.radius,
-            BoardGeometry.POCKET_RADIUS - PUCK_DROP_MARGIN, pieces, target, striker, TARGET_GUIDE_LENGTH
+            BoardGeometry.POCKET_RADIUS * tuning.pocketScale - PUCK_DROP_MARGIN, pieces, target, striker, TARGET_GUIDE_LENGTH,
+            tuning.discFriction, tuning.linearDrag
         )
 
         // The heavier striker keeps its tangential velocity plus part of the normal component.
@@ -585,7 +623,7 @@ object CarromPhysicsEngine {
             val end = projectDisc(
                 ghostX, ghostY, dvx / dSpeed, dvy / dSpeed, dSpeed, striker.radius,
                 pocketThreshold = 0f, pieces = pieces, ignoreA = target, ignoreB = striker,
-                maxLength = DEFLECT_GUIDE_LENGTH
+                maxLength = DEFLECT_GUIDE_LENGTH, friction = tuning.strikerFriction, drag = tuning.linearDrag
             )
             listOf(Vector2D(ghostX, ghostY), Vector2D(end.x, end.y))
         } else {
@@ -619,9 +657,11 @@ object CarromPhysicsEngine {
         pieces: List<Piece>,
         ignoreA: Piece?,
         ignoreB: Piece?,
-        maxLength: Float
+        maxLength: Float,
+        friction: Float = FRICTION_BASE,
+        drag: Float = LINEAR_DRAG
     ): Projection {
-        val length = min(frictionTravel(speed), maxLength)
+        val length = min(frictionTravel(speed, friction, drag), maxLength)
         if (length <= 0.5f) return Projection(x, y, -1)
         val dx = dirX * length
         val dy = dirY * length
@@ -659,9 +699,9 @@ object CarromPhysicsEngine {
     }
 
     /** Distance a disc launched at [speed] glides before powder friction stops it. */
-    private fun frictionTravel(speed: Float): Float {
-        val stepFriction = FRICTION_BASE.pow(TRAJECTORY_STEP)
-        val stepDrag = LINEAR_DRAG * TRAJECTORY_STEP
+    private fun frictionTravel(speed: Float, friction: Float, drag: Float): Float {
+        val stepFriction = friction.pow(TRAJECTORY_STEP)
+        val stepDrag = drag * TRAJECTORY_STEP
         var s = speed
         var distance = 0f
         while (s > TRAJECTORY_MIN_SPEED && distance < BoardGeometry.BOARD_SIZE * 2f) {

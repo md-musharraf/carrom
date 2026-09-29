@@ -19,7 +19,7 @@ What the category leaders ship, and what players expect:
 | Daily hooks | Free daily rewards, Lucky Shot, Golden Shot, lucky wheel | Server-authoritative daily streak + wheel; Lucky Shot mini-game |
 | Social | Friends, invites, clubs with weekly boards and gifting, quick chat / voice | Friends, private rooms, invites, quick-chat emotes; clubs next |
 | Monetisation | Season pass (Carrom Pass), cosmetic strikers/boards | Cosmetics already exist; season pass later |
-| Team play | 4-player doubles | Planned (needs 4-seat turn order) |
+| Team play | 4-player doubles | Local doubles shipped; online doubles planned |
 
 Sources: [Carrom Pool on Google Play](https://play.google.com/store/apps/details?id=com.miniclip.carrom&hl=en_GB),
 [Miniclip — Carrom Pool](https://www.miniclip.com/games/carrom),
@@ -59,6 +59,15 @@ Engineering references: [Google ID token verification](https://developers.google
 - **New offline modes**: **Blitz** (race the bot to 120 with a 10-second shot clock) and
   **Lucky Shot** (three free daily flicks into prize rings worth up to 500 coins). The daily
   wheel is now once per day with the same odds as the server's.
+
+### Phase 1.5 — Home, modes and powers (shipped)
+- **Home page** with quick play, a mode grid, loadout and career; the table is a separate,
+  full-width screen with larger controls.
+- **Party play**: 2–4 players on one device, any seat a bot, doubles for four.
+- **New modes**: Dice Carrom, Time Attack; Disc Pool now plays real colour-ownership rules.
+- **Loadout powers**: strikers, coin sets, dice and boards each have one power (offline only,
+  can be switched off). Coin sets and dice are new Locker categories.
+- **Aiming fix**: diagonal pulls no longer slide the striker; bigger touch target; aim lock.
 
 ### Phase 2 — Retention
 - Victory chests and a chest queue; missions and achievements.

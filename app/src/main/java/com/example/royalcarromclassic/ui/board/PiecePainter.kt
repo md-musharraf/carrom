@@ -11,6 +11,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.lerp
+import com.example.royalcarromclassic.data.CoinSet
 import com.example.royalcarromclassic.data.PieceType
 import com.example.royalcarromclassic.data.StrikerConfig
 import com.example.royalcarromclassic.engine.BoardGeometry
@@ -58,6 +59,19 @@ class PieceArt(base: Color, edge: Color, val radius: Float) {
             val (base, edge) = PieceFactory.colorsForType(type)
             return PieceArt(base, edge, radius)
         }
+    }
+}
+
+/** Cached looks for the three kinds of carrom men in one [CoinSet], at [radius]. */
+class CoinSetArt(val set: CoinSet, val radius: Float = BoardGeometry.PUCK_RADIUS) {
+    val white = PieceArt(set.whiteFace, set.whiteEdge, radius)
+    val black = PieceArt(set.blackFace, set.blackEdge, radius)
+    val queen = PieceArt(set.queenFace, set.queenEdge, radius)
+
+    fun forType(type: PieceType): PieceArt = when (type) {
+        PieceType.WHITE -> white
+        PieceType.BLACK -> black
+        else -> queen
     }
 }
 

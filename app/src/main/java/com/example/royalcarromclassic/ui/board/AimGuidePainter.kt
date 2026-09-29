@@ -113,9 +113,16 @@ private fun DrawScope.drawDottedPath(
     }
 }
 
-/** Elastic slingshot band from the striker to the finger, plus a power gauge ring. */
-fun DrawScope.drawPullBand(strikerX: Float, strikerY: Float, strikerRadius: Float, pull: Offset, powerFraction: Float) {
-    val tension = tensionColor(powerFraction)
+/** Elastic slingshot band; greyed out while [armed] is false (releasing there cancels the shot). */
+fun DrawScope.drawPullBand(
+    strikerX: Float,
+    strikerY: Float,
+    strikerRadius: Float,
+    pull: Offset,
+    powerFraction: Float,
+    armed: Boolean = true
+) {
+    val tension = if (armed) tensionColor(powerFraction) else CarromPalette.Muted
     val center = Offset(strikerX, strikerY)
     drawLine(tension, center, pull, strokeWidth = 3f, cap = StrokeCap.Round, alpha = 0.85f)
     drawCircle(tension, 9f, pull, alpha = 0.3f)
@@ -126,7 +133,7 @@ fun DrawScope.drawPullBand(strikerX: Float, strikerY: Float, strikerRadius: Floa
     val topLeft = Offset(strikerX - ringRadius, strikerY - ringRadius)
     val ringSize = androidx.compose.ui.geometry.Size(ringRadius * 2f, ringRadius * 2f)
     drawArc(Color.White, -90f, 360f, false, topLeft, ringSize, alpha = 0.15f, style = gaugeStroke)
-    drawArc(tension, -90f, 360f * powerFraction, false, topLeft, ringSize, style = gaugeStroke)
+    if (armed) drawArc(tension, -90f, 360f * powerFraction, false, topLeft, ringSize, style = gaugeStroke)
 }
 
 private val gaugeStroke = Stroke(width = 4f, cap = StrokeCap.Round)

@@ -10,7 +10,7 @@ import androidx.activity.enableEdgeToEdge
 import com.example.royalcarromclassic.online.AndroidSocialAuth
 import com.example.royalcarromclassic.online.SocialAuthProvider
 import com.example.royalcarromclassic.theme.RoyalCarromClassicTheme
-import com.example.royalcarromclassic.ui.MainGameScreen
+import com.example.royalcarromclassic.ui.CarromApp
 import com.example.royalcarromclassic.ui.PlatformBridge
 
 class MainActivity : ComponentActivity() {
@@ -33,7 +33,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             RoyalCarromClassicTheme {
-                MainGameScreen(platform = platform)
+                CarromApp(platform = platform)
             }
         }
     }

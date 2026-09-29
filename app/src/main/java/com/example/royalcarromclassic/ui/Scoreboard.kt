@@ -75,7 +75,11 @@ fun PlayerPlate(
     mirrored: Boolean,
     modifier: Modifier = Modifier,
     clock: TurnClock? = null,
-    badge: String? = null
+    badge: String? = null,
+    /** Disc Pool: the colour this player must pocket, shown beside the name. */
+    discColour: PieceType? = null,
+    /** Shown after the score, e.g. "/9" in Disc Pool. */
+    scoreSuffix: String? = null
 ) {
     val edge by animateColorAsState(
         if (isActive) accent else CarromPalette.Seam,
@@ -124,6 +128,7 @@ fun PlayerPlate(
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     if (mirrored && badge != null) Tag(badge, color = accent)
+                    if (discColour != null) MiniDisc(discColour, 16.dp)
                     Text(
                         player.name,
                         style = MaterialTheme.typography.titleSmall,
@@ -144,7 +149,12 @@ fun PlayerPlate(
             }
         }
         val score: @Composable () -> Unit = {
-            RollingScore(player.score, color = if (isActive) CarromPalette.GoldLight else CarromPalette.Parchment)
+            Row(verticalAlignment = Alignment.Bottom) {
+                RollingScore(player.score, color = if (isActive) CarromPalette.GoldLight else CarromPalette.Parchment)
+                if (scoreSuffix != null) {
+                    Text(scoreSuffix, style = MaterialTheme.typography.titleSmall, color = CarromPalette.Muted, modifier = Modifier.padding(bottom = 4.dp))
+                }
+            }
         }
 
         if (mirrored) {
@@ -190,7 +200,7 @@ fun ChallengePlate(status: TrickShotStatus, modifier: Modifier = Modifier) {
  * the last few seconds. One linear animation per turn; nothing recomposes while it runs.
  */
 @Composable
-private fun TurnClockRing(clock: TurnClock, accent: Color, modifier: Modifier = Modifier) {
+internal fun TurnClockRing(clock: TurnClock, accent: Color, modifier: Modifier = Modifier) {
     val left = remember(clock) { Animatable(clockFraction(clock)) }
     LaunchedEffect(clock) {
         val remaining = (clock.deadlineMillis - System.currentTimeMillis()).coerceAtLeast(0L)
@@ -247,7 +257,7 @@ fun LuckyShotPlate(status: LuckyShotStatus, modifier: Modifier = Modifier) {
 
 /** Serif score that rolls to its new value like a mechanical counter. */
 @Composable
-private fun RollingScore(score: Int, color: Color) {
+internal fun RollingScore(score: Int, color: Color) {
     AnimatedContent(
         targetState = score,
         transitionSpec = {
@@ -360,9 +370,11 @@ val GameMode.displayName: String
         GameMode.DISC_POOL -> "Disc Pool"
         GameMode.FREESTYLE -> "Freestyle"
         GameMode.TRICK_SHOTS -> "Trick Shots"
-        GameMode.PASS_AND_PLAY -> "Pass & Play"
+        GameMode.PASS_AND_PLAY -> "Party"
         GameMode.PRACTICE -> "Practice"
         GameMode.BLITZ -> "Blitz"
         GameMode.LUCKY_SHOT -> "Lucky Shot"
         GameMode.ONLINE -> "Online"
+        GameMode.DICE -> "Dice Carrom"
+        GameMode.TIME_ATTACK -> "Time Attack"
     }

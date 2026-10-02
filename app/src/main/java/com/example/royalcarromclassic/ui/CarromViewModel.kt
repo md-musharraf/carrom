@@ -150,9 +150,11 @@ class CarromViewModel @JvmOverloads constructor(
                 selectedBoardId = repository.getSelectedBoard(),
                 selectedCoinSetId = repository.getSelection(SELECTION_COINS, DEFAULT_COIN_SET),
                 selectedDiceId = repository.getSelection(SELECTION_DICE, DEFAULT_DICE),
-                powersEnabled = repository.getFlag(FLAG_POWERS, true)
+                powersEnabled = repository.getFlag(FLAG_POWERS, true),
+                playStyle = PlayStyle.entries.find { s -> s.name == repository.getSelection(SELECTION_STYLE, "") } ?: PlayStyle.NORMAL
             )
         }
+        sound.setStyle(_gameState.value.playStyle)
         startNewGame(GameMode.VS_AI, AIDifficulty.MEDIUM)
 
         if (online != null) {
@@ -217,7 +219,11 @@ class CarromViewModel @JvmOverloads constructor(
             },
             onPocket = { piece, pocket ->
                 pocketedThisShot.add(piece)
-                sound.playPocket()
+                when (piece.type) {
+                    PieceType.STRIKER -> sound.playFoul()
+                    PieceType.QUEEN -> sound.playQueen()
+                    else -> sound.playPocket()
+                }
                 haptic.vibratePocket()
                 effects.particles.spawnPocketVortex(pocket.x, pocket.y)
                 if (piece.type != PieceType.STRIKER) refreshBoardSummary()
@@ -607,7 +613,8 @@ class CarromViewModel @JvmOverloads constructor(
                     pieces = _pieces.value,
                     maxBounces = Powers.guideBounces(ability, face),
                     powerMultiplier = shotPowerMultiplier(state),
-                    maxLength = Powers.guideLength(if (state.powersActive) config else standardStriker(), face),
+                    maxLength = Powers.guideLength(if (state.powersActive) config else standardStriker(), face) *
+                        if (state.playStyle == PlayStyle.KIDS) KIDS_GUIDE_SCALE else 1f,
                     tuning = Powers.shotTuning(tableTuning, ability, face)
                 )
             }
@@ -1106,6 +1113,7 @@ class CarromViewModel @JvmOverloads constructor(
             _gameState.update { it.copy(matchCoins = coins) }
             awardRewards(coins = coins, xp = MATCH_WIN_XP)
         } else {
+            sound.playDefeat()
             repository.savePlayerStats(_playerStats.value)
         }
     }
@@ -1343,7 +1351,7 @@ class CarromViewModel @JvmOverloads constructor(
                 )
             )
         }
-        if (won) sound.playVictory()
+        if (won) sound.playVictory() else sound.playDefeat()
     }
 
     /** Our match finished while we were away (e.g. the opponent won on time). */
@@ -1620,6 +1628,15 @@ class CarromViewModel @JvmOverloads constructor(
     /** The best Time Attack score so far. */
     fun timeAttackBest(): Int = repository.getBest(BEST_TIME_ATTACK)
 
+    /** Kids, Normal or Meme: the sound pack now, and the kids' aim guide from the next aim. */
+    fun setPlayStyle(style: PlayStyle) {
+        repository.setSelection(SELECTION_STYLE, style.name)
+        sound.setStyle(style)
+        _gameState.update { it.copy(playStyle = style) }
+        refreshAimPreview()
+        sound.playClick()
+    }
+
     fun toggleSound() {
         val next = !_gameState.value.soundEnabled
         sound.isSoundEnabled = next
@@ -1718,6 +1735,10 @@ class CarromViewModel @JvmOverloads constructor(
         const val SELECTION_COINS = "coins"
         const val SELECTION_DICE = "dice"
         const val FLAG_POWERS = "powers"
+        const val SELECTION_STYLE = "play_style"
+
+        /** Kids see a longer aim guide in offline play. */
+        const val KIDS_GUIDE_SCALE = 1.6f
         const val BEST_TIME_ATTACK = "time_attack"
         const val DEFAULT_COIN_SET = "heritage_boxwood"
         const val DEFAULT_DICE = "ivory_die"

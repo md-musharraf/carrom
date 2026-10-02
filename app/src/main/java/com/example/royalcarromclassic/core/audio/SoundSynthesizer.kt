@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.AudioAttributes
 import android.media.SoundPool
 import com.example.royalcarromclassic.core.logging.AppLogger
+import com.example.royalcarromclassic.data.PlayStyle
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -13,6 +14,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.*
 
 /**
@@ -36,6 +38,12 @@ class SoundSynthesizer(private val context: Context? = null) : AudioEngine {
     private var coinSoundId = 0
     private var clickSoundId = 0
     private var victorySoundId = 0
+
+    @Volatile private var style = PlayStyle.NORMAL
+    private val clips = ConcurrentHashMap<String, List<Int>>()
+
+    /** Kids hear everything a little higher and brighter. */
+    private val pitch get() = if (style == PlayStyle.KIDS) 1.25f else 1f
 
     private var lastClackTimeNanos = 0L
     private var lastWallTimeNanos = 0L
@@ -185,9 +193,34 @@ class SoundSynthesizer(private val context: Context? = null) : AudioEngine {
                 })
             }
             victorySoundId = pool.load(victoryFile.absolutePath, 1)
+
+            loadClips(ctx, pool)
         } catch (e: Exception) {
             AppLogger.e("SoundSynthesizer", { "Error synthesizing audio files" }, e)
         }
+    }
+
+    /**
+     * The meme and kids sounds are files you add, not synthesized: put them in
+     * `assets/sounds/<kids|meme>/<event>.<mp3|ogg|wav>`, where event is pocket, foul, queen, win
+     * or lose. Add `foul_2.mp3`, `foul_3.mp3`, ... for more and one is picked at random.
+     */
+    private fun loadClips(ctx: Context, pool: SoundPool) {
+        for (folder in listOf("kids", "meme")) {
+            val dir = "sounds/$folder"
+            val files = ctx.assets.list(dir).orEmpty().filter { it.substringAfterLast('.').lowercase() in CLIP_TYPES }
+            for ((event, names) in files.groupBy { it.substringBeforeLast('.').substringBefore('_').lowercase() }) {
+                clips["$folder/$event"] = names.map { name -> ctx.assets.openFd("$dir/$name").use { pool.load(it, 1) } }
+            }
+        }
+    }
+
+    /** Plays one of the style's clips for [event]; false when there is none, so the caller falls back. */
+    private fun playClip(event: String): Boolean {
+        if (!isSoundEnabled || style == PlayStyle.NORMAL) return false
+        val ids = clips["${style.name.lowercase()}/$event"] ?: return false
+        soundPool?.play(ids.random(), 1.0f, 1.0f, 3, 0, 1.0f) ?: return false
+        return true
     }
 
     private fun generateWav(durationMs: Int, generator: (Int, Int) -> Short): ByteArray {
@@ -237,7 +270,7 @@ class SoundSynthesizer(private val context: Context? = null) : AudioEngine {
         if (clackSoundId > 0) {
             val volume = intensity.coerceIn(0.15f, 1.0f)
             val pitch = 0.92f + (Math.random().toFloat() * 0.16f) // Organic pitch variation
-            pool.play(clackSoundId, volume, volume, 1, 0, pitch)
+            pool.play(clackSoundId, volume, volume, 1, 0, pitch * this.pitch)
         }
     }
 
@@ -246,7 +279,7 @@ class SoundSynthesizer(private val context: Context? = null) : AudioEngine {
         val pool = soundPool ?: return
         if (flickSoundId > 0) {
             val volume = (power / 100f).coerceIn(0.25f, 1.0f)
-            pool.play(flickSoundId, volume, volume, 2, 0, 1.0f)
+            pool.play(flickSoundId, volume, volume, 2, 0, pitch)
         }
     }
 
@@ -259,23 +292,25 @@ class SoundSynthesizer(private val context: Context? = null) : AudioEngine {
         val pool = soundPool ?: return
         if (wallSoundId > 0) {
             val volume = intensity.coerceIn(0.2f, 1.0f)
-            pool.play(wallSoundId, volume, volume, 1, 0, 1.0f)
+            pool.play(wallSoundId, volume, volume, 1, 0, pitch)
         }
     }
 
     override fun playPocket() {
         if (!isSoundEnabled) return
+        if (playClip("pocket")) return
         val pool = soundPool ?: return
         if (pocketSoundId > 0) {
-            pool.play(pocketSoundId, 1.0f, 1.0f, 2, 0, 1.0f)
+            pool.play(pocketSoundId, 1.0f, 1.0f, 2, 0, pitch)
         }
     }
 
     override fun playVictory() {
         if (!isSoundEnabled) return
         val pool = soundPool ?: return
+        if (playClip("win")) return
         if (victorySoundId > 0) {
-            pool.play(victorySoundId, 1.0f, 1.0f, 3, 0, 1.0f)
+            pool.play(victorySoundId, 1.0f, 1.0f, 3, 0, pitch)
         }
     }
 
@@ -283,7 +318,7 @@ class SoundSynthesizer(private val context: Context? = null) : AudioEngine {
         if (!isSoundEnabled) return
         val pool = soundPool ?: return
         if (coinSoundId > 0) {
-            pool.play(coinSoundId, 0.9f, 0.9f, 2, 0, 1.0f)
+            pool.play(coinSoundId, 0.9f, 0.9f, 2, 0, pitch)
         }
     }
 
@@ -291,12 +326,32 @@ class SoundSynthesizer(private val context: Context? = null) : AudioEngine {
         if (!isSoundEnabled) return
         val pool = soundPool ?: return
         if (clickSoundId > 0) {
-            pool.play(clickSoundId, 0.6f, 0.6f, 1, 0, 1.0f)
+            pool.play(clickSoundId, 0.6f, 0.6f, 1, 0, pitch)
         }
+    }
+
+    override fun setStyle(style: PlayStyle) {
+        this.style = style
+    }
+
+    override fun playFoul() {
+        if (!playClip("foul")) playPocket()
+    }
+
+    override fun playQueen() {
+        if (!playClip("queen")) playPocket()
+    }
+
+    override fun playDefeat() {
+        playClip("lose")
     }
 
     override fun release() {
         soundPool?.release()
         soundPool = null
+    }
+
+    private companion object {
+        val CLIP_TYPES = setOf("mp3", "ogg", "wav", "m4a")
     }
 }

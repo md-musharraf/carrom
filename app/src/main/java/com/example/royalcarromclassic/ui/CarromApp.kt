@@ -18,6 +18,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.royalcarromclassic.data.AIDifficulty
 import com.example.royalcarromclassic.data.GameMode
+import com.example.royalcarromclassic.data.PlayStyle
 import com.example.royalcarromclassic.ui.online.AccountSheet
 import com.example.royalcarromclassic.ui.online.CommunitySheet
 import com.example.royalcarromclassic.ui.online.CommunityTab
@@ -142,6 +143,7 @@ fun CarromApp(
                 overlay = Overlay.RULES
             }
             override fun togglePowers() = viewModel.togglePowers()
+            override fun setPlayStyle(style: PlayStyle) = viewModel.setPlayStyle(style)
         }
     }
 

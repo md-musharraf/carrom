@@ -47,7 +47,7 @@ class MockGameRepository : GameRepository {
     override fun setBest(key: String, value: Int) { bests[key] = value }
 }
 
-class MockAudioEngine : AudioEngine {
+open class MockAudioEngine : AudioEngine {
     override var isSoundEnabled: Boolean = true
     override var isMusicEnabled: Boolean = true
     override fun playClack(intensity: Float) {}

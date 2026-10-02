@@ -44,6 +44,13 @@ enum class AIDifficulty {
     HARD
 }
 
+/** How the game sounds and helps: gentle for kids, classic, or meme sounds. */
+enum class PlayStyle(val title: String, val blurb: String) {
+    KIDS("Kids", "Long aim guide and bright, playful sounds"),
+    NORMAL("Normal", "The classic wooden table"),
+    MEME("Meme", "Meme sounds on pockets, fouls, the queen and the result")
+}
+
 enum class TurnState {
     PLACING_STRIKER,
     AIMING,
@@ -369,6 +376,7 @@ data class GameState(
     val soundEnabled: Boolean = true,
     val musicEnabled: Boolean = true,
     val hapticEnabled: Boolean = true,
+    val playStyle: PlayStyle = PlayStyle.NORMAL,
 
     val toastMessage: String? = null
 ) {

@@ -61,6 +61,7 @@ interface HomeActions {
     fun openSettings()
     fun openRules()
     fun togglePowers()
+    fun setPlayStyle(style: PlayStyle)
 }
 
 /** What the home page shows; plain values so it previews and tests without a ViewModel. */
@@ -92,7 +93,9 @@ private data class ModeTile(
     val glyph: Glyph,
     val accent: Color,
     val badge: String? = null,
-    val enabled: Boolean = true
+    val enabled: Boolean = true,
+    /** Overrides the mode's usual start (online tiles open sheets instead). */
+    val action: (() -> Unit)? = null
 )
 
 /**
@@ -102,6 +105,7 @@ private data class ModeTile(
 @Composable
 fun HomeScreen(info: HomeInfo, actions: HomeActions, modifier: Modifier = Modifier) {
     var difficulty by rememberSaveableDifficulty(info.state.aiDifficulty)
+    var onlineTab by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
     Column(
         modifier
             .fillMaxSize()
@@ -113,18 +117,29 @@ fun HomeScreen(info: HomeInfo, actions: HomeActions, modifier: Modifier = Modifi
         HomeTopBar(info, actions)
         HeroCard(info, difficulty, onDifficulty = { difficulty = it }, actions = actions)
 
-        OrnamentHeading("Game modes")
-        ModeGrid(modeTiles(info), onPick = { tile ->
-            when (tile.mode) {
-                GameMode.PASS_AND_PLAY, GameMode.DICE, GameMode.DISC_POOL, GameMode.CLASSIC, GameMode.FREESTYLE ->
-                    actions.setUpMatch(tile.mode)
-                GameMode.TRICK_SHOTS -> actions.openTrickShots()
-                GameMode.ONLINE -> actions.openOnline()
-                else -> actions.startMode(tile.mode, difficulty)
-            }
-        })
+        OrnamentHeading("Play style")
+        PlayStyleCard(info.state.playStyle, actions::setPlayStyle)
 
-        if (info.onlineAvailable) OnlineCard(info, actions)
+        OrnamentHeading("Game modes")
+        SegmentedSelector(
+            options = listOf("Offline", "Online"),
+            selectedIndex = if (onlineTab) 1 else 0,
+            onSelect = { onlineTab = it == 1 }
+        )
+        if (onlineTab) {
+            if (info.onlineAvailable) OnlineCard(info, actions) else OfflineNotice()
+            ModeGrid(onlineTiles(info, actions), onPick = { it.action?.invoke() })
+        } else {
+            ModeGrid(modeTiles(info), onPick = { tile ->
+                when (tile.mode) {
+                    GameMode.PASS_AND_PLAY, GameMode.DICE, GameMode.DISC_POOL, GameMode.CLASSIC, GameMode.FREESTYLE ->
+                        actions.setUpMatch(tile.mode)
+                    GameMode.TRICK_SHOTS -> actions.openTrickShots()
+                    GameMode.ONLINE -> actions.openOnline()
+                    else -> actions.startMode(tile.mode, difficulty)
+                }
+            })
+        }
 
         OrnamentHeading("Your loadout")
         LoadoutCard(info, actions)
@@ -337,6 +352,55 @@ private fun ModeTileCard(tile: ModeTile, onClick: () -> Unit, modifier: Modifier
         Text(tile.title, style = MaterialTheme.typography.titleMedium, color = CarromPalette.Ivory, maxLines = 1)
         Text(tile.tagline, style = MaterialTheme.typography.bodySmall, color = CarromPalette.Parchment, maxLines = 2)
     }
+}
+
+/** Kids, Normal or Meme: changes the sounds (and the kids' aim guide) everywhere. */
+@Composable
+private fun PlayStyleCard(style: PlayStyle, onSelect: (PlayStyle) -> Unit) {
+    val styles = PlayStyle.entries
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .classicPanel(accentAlpha = 0.3f)
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        SegmentedSelector(
+            options = styles.map { it.title },
+            selectedIndex = styles.indexOf(style),
+            onSelect = { onSelect(styles[it]) }
+        )
+        Text(style.blurb, style = MaterialTheme.typography.bodySmall, color = CarromPalette.Parchment)
+    }
+}
+
+/** Online tiles need the server; without it they open the sheets, which explain what's missing. */
+private fun onlineTiles(info: HomeInfo, actions: HomeActions): List<ModeTile> {
+    val signedIn = info.signedIn == true
+    return listOf(
+        ModeTile(GameMode.ONLINE, "Ranked", "Matched by rating · win the pot", Glyph.Trophy, CarromPalette.Jade, "1v1",
+            enabled = info.onlineAvailable, action = actions::openOnline),
+        ModeTile(GameMode.ONLINE, "Private room", "Share a code, play a friend", Glyph.Globe, CarromPalette.GoldLight,
+            enabled = info.onlineAvailable, action = actions::openOnline),
+        ModeTile(GameMode.ONLINE, "Friends", "Invites, friends and leaderboards", Glyph.Players, CarromPalette.Silver,
+            enabled = info.onlineAvailable, action = actions::openCommunity),
+        ModeTile(GameMode.ONLINE, "Account", if (signedIn) "Your profile and sign-in" else "Sign in to play online",
+            Glyph.User, CarromPalette.Amber, if (signedIn) null else "Sign in",
+            enabled = info.onlineAvailable, action = actions::openAccount)
+    )
+}
+
+@Composable
+private fun OfflineNotice() {
+    Text(
+        "Online play isn't available right now. Every offline mode still works — no internet needed.",
+        style = MaterialTheme.typography.bodySmall,
+        color = CarromPalette.Parchment,
+        modifier = Modifier
+            .fillMaxWidth()
+            .classicPanel(accentAlpha = 0.18f)
+            .padding(12.dp)
+    )
 }
 
 @Composable

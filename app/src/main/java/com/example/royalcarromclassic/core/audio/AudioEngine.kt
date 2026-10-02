@@ -1,5 +1,7 @@
 package com.example.royalcarromclassic.core.audio
 
+import com.example.royalcarromclassic.data.PlayStyle
+
 /**
  * Interface defining the audio contract for the game.
  * Follows the Dependency Inversion Principle (DIP).
@@ -16,4 +18,10 @@ interface AudioEngine {
     fun playCoin()
     fun playClick()
     fun release()
+
+    /** Swaps the sound pack; Normal keeps the classic sounds. */
+    fun setStyle(style: PlayStyle) {}
+    fun playFoul() = playPocket()
+    fun playQueen() = playPocket()
+    fun playDefeat() {}
 }
